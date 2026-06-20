@@ -8,18 +8,30 @@
 #   assets/Engine/
 #   ├── manifest.toml          ← this file
 #   ├── Gizmos/                ← gizmo tool meshes
-#   │   ├── GizmosMoveTool.fbx ← translate gizmo (3-axis arrows + center sphere)
-#   │   └── GizmosSphere.fbx   ← uniform scale handle (center sphere)
+#   │   ├── GizmosMoveTool.fbx ← source: translate gizmo (3-axis arrows + center sphere)
+#   │   ├── GizmosMoveTool.bin ← converted: vertex + index data
+#   │   ├── GizmosMoveTool.json← converted: mesh metadata
+#   │   ├── GizmosSphere.fbx  ← source: uniform scale handle (center sphere)
+#   │   ├── GizmosSphere.bin  ← converted: vertex + index data
+#   │   └── GizmosSphere.json ← converted: mesh metadata
 #   └── ...                    ← future engine assets (grid, icons, etc.)
 
 [assets.gizmo_move_tool]
-path = "Gizmos/GizmosMoveTool.fbx"
+source = "Gizmos/GizmosMoveTool.fbx"
+path = "Gizmos/GizmosMoveTool.bin"
+meta = "Gizmos/GizmosMoveTool.json"
 description = "3-axis translation gizmo with arrow shafts and center sphere"
 category = "gizmo"
 tool = "translate"
+vertices = 284
+triangles = 547
 
 [assets.gizmo_sphere]
-path = "Gizmos/GizmosSphere.fbx"
+source = "Gizmos/GizmosSphere.fbx"
+path = "Gizmos/GizmosSphere.bin"
+meta = "Gizmos/GizmosSphere.json"
 description = "Uniform scale handle sphere for the center of the gizmo"
 category = "gizmo"
 tool = "scale_uniform"
+vertices = 44
+triangles = 84

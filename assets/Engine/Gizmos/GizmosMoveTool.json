@@ -1,0 +1,18 @@
+{
+  "name": "GizmosMoveTool",
+  "vertex_count": 284,
+  "index_count": 1641,
+  "triangle_count": 547,
+  "vertex_stride": 12,
+  "index_format": "uint32",
+  "aabb_min": [
+    -0.977471,
+    -0.977471,
+    -1.317239
+  ],
+  "aabb_max": [
+    1.01183,
+    0.977471,
+    28.718271
+  ]
+}
