@@ -467,9 +467,10 @@ impl EditorViewportRenderer {
         }
 
         // Resize gizmo vertex buffer if needed to fit the 3-arrow gizmo
-        // (3 copies of the move mesh vertices)
+        // (3 copies of the move mesh vertices) plus sphere vertices
         if !move_verts.is_empty() {
-            let gizmo_vert_count = move_indices.len() * 3; // 3 arrows
+            let sphere_vert_count = if sphere_verts.is_empty() { 0 } else { sphere_indices.len() };
+            let gizmo_vert_count = move_indices.len() * 3 + sphere_vert_count; // 3 arrows + sphere
             if gizmo_vert_count > self.gizmo_vertex_capacity {
                 let new_capacity = gizmo_vert_count.next_power_of_two();
                 self.gizmo_vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -482,12 +483,12 @@ impl EditorViewportRenderer {
             }
 
             self.fbx_gizmo_move = Some((move_verts, move_indices));
-            eprintln!("pie_editor: loaded FBX gizmo move tool (merged {} vertices)", self.fbx_gizmo_move.as_ref().unwrap().0.len());
+            eprintln!("pie_editor: loaded FBX gizmo move tool (merged {} vertices, {} indices)", self.fbx_gizmo_move.as_ref().unwrap().0.len(), self.fbx_gizmo_move.as_ref().unwrap().1.len());
         }
 
         if !sphere_verts.is_empty() {
             self.fbx_gizmo_sphere = Some((sphere_verts, sphere_indices));
-            eprintln!("pie_editor: loaded FBX gizmo sphere (merged {} vertices)", self.fbx_gizmo_sphere.as_ref().unwrap().0.len());
+            eprintln!("pie_editor: loaded FBX gizmo sphere (merged {} vertices, {} indices)", self.fbx_gizmo_sphere.as_ref().unwrap().0.len(), self.fbx_gizmo_sphere.as_ref().unwrap().1.len());
         }
     }
 
@@ -614,7 +615,11 @@ impl EditorViewportRenderer {
 
                 // Use FBX gizmo mesh if loaded, otherwise fall back to procedural
                 let gizmo_verts = if let Some((ref verts, ref indices)) = self.fbx_gizmo_move {
-                    build_fbx_gizmo_mesh(origin, verts, indices, scale, hovered_axis, hovered_center, gizmo_state)
+                    let (sp_verts, sp_indices) = match self.fbx_gizmo_sphere {
+                        Some((ref sv, ref si)) => (Some(sv.as_slice()), Some(si.as_slice())),
+                        None => (None, None),
+                    };
+                    build_fbx_gizmo_mesh(origin, verts, indices, sp_verts, sp_indices, scale, hovered_axis, hovered_center, gizmo_state)
                 } else {
                     build_gizmo_mesh(origin, cam_pos, scale, hovered_axis, hovered_center, gizmo_state)
                 };

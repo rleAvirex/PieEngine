@@ -363,7 +363,7 @@ pub fn gizmo_center_aabb(origin: Vec3, gizmo_scale: f32) -> (Vec3, Vec3) {
 /// of ~0.5, matching the procedural gizmo.
 const FBX_GIZMO_SCALE_DIVISOR: f32 = 29.0;
 
-/// Convert an FBX-loaded mesh (MeshVertex format) into GizmoVertex triangles
+/// Convert FBX-loaded meshes (MeshVertex format) into GizmoVertex triangles
 /// with axis-based coloring.
 ///
 /// The FBX GizmosMoveTool model contains a single arrow along Blender's +Z
@@ -375,12 +375,18 @@ const FBX_GIZMO_SCALE_DIVISOR: f32 = 29.0;
 /// - **+X arrow (red)**: rotate the original by +90° around Z, then swap
 /// - **+Z arrow (blue)**: rotate the original by -90° around X, then swap
 ///
+/// If `sphere_vertices` and `sphere_indices` are provided, the GizmosSphere
+/// mesh is rendered at the gizmo origin with white/center coloring, serving
+/// as the center handle for uniform scaling.
+///
 /// Each vertex is colored based on which arrow it belongs to, with hover
 /// highlighting support.
 pub fn build_fbx_gizmo_mesh(
     origin: Vec3,
     vertices: &[pie_runtime::assets::MeshVertex],
     indices: &[u32],
+    sphere_vertices: Option<&[pie_runtime::assets::MeshVertex]>,
+    sphere_indices: Option<&[u32]>,
     gizmo_scale: f32,
     hovered_axis: Option<Axis>,
     hovered_center: bool,
@@ -392,19 +398,18 @@ pub fn build_fbx_gizmo_mesh(
     // Final scale: procedural gizmo scale divided by the FBX divisor
     let scale = gizmo_scale / FBX_GIZMO_SCALE_DIVISOR;
 
-    // The FBX arrow points along Blender +Z. After the (x,z,y) swap it
-    // becomes +Y in engine space. To create X and Z arrows, we pre-rotate
-    // the Blender-space positions before applying the axis swap:
-    //
-    //   +X arrow (red):   rotate Blender verts +90° around Z
-    //                     (x,y,z) → (-y,x,z), then swap → (-y,z,x)
-    //   +Y arrow (green): no pre-rotation, just swap (x,z,y)
-    //   +Z arrow (blue):  rotate Blender verts -90° around X
-    //                     (x,y,z) → (x,z,-y), then swap → (x,-y,z)
+    // The FBX arrow has the cone (arrowhead) near Z≈0 and the shaft extends
+    // to Z≈29 in Blender space. For a gizmo, we want the arrowhead at the
+    // TIP (far end). We mirror the arrow along Z: new_z = FBX_ARROW_LENGTH - z.
+    // This puts the shaft base near Z≈0 and the cone at Z≈29 (the tip).
+    const FBX_ARROW_LENGTH: f32 = 29.0;
 
     let axis_count = 3u32;
     let verts_per_arrow = indices.len();
-    let mut result = Vec::with_capacity((verts_per_arrow * axis_count as usize) as usize);
+    let sphere_vert_count = sphere_indices.map(|si| si.len()).unwrap_or(0);
+    let mut result = Vec::with_capacity(
+        (verts_per_arrow * axis_count as usize) + sphere_vert_count,
+    );
 
     for axis_idx in 0..axis_count {
         let axis = match axis_idx {
@@ -429,37 +434,60 @@ pub fn build_fbx_gizmo_mesh(
             let v = &vertices[i];
             let local = Vec3::from(v.position);
 
-            // Apply pre-rotation in Blender space, then (x,z,y) swap.
-            // The FBX arrow is along Blender +Z. We create 3 engine-space
-            // arrows by pre-rotating in Blender space before the swap:
-            //
-            //   +X arrow (red):   Ry(+90) then swap → (bz, -bx, by)
-            //   +Y arrow (green): no rotation, just swap → (bx, bz, by)
-            //   +Z arrow (blue):  Rx(-90) then swap → (bx, -by, bz)
+            // Mirror along Z so the arrowhead moves to the tip.
+            // Also negate X to preserve triangle winding order (the mirror
+            // flips it, and negating X restores it).
+            let mirrored = Vec3::new(-local.x, local.y, FBX_ARROW_LENGTH - local.z);
+
+            // Apply pre-rotation in Blender space, then (x,z,y) swap to
+            // convert from Blender Z-up to engine Y-up.
             let rotated = match axis_idx {
-                0 => Vec3::new(local.z, -local.x, local.y), // +X
-                1 => Vec3::new(local.x, local.z, local.y),  // +Y
-                2 => Vec3::new(local.x, -local.y, local.z), // +Z
+                0 => Vec3::new(mirrored.z, -mirrored.x, mirrored.y),  // +X
+                1 => Vec3::new(mirrored.x, mirrored.z, mirrored.y),   // +Y
+                2 => Vec3::new(mirrored.x, -mirrored.y, mirrored.z),  // +Z
                 _ => unreachable!(),
             };
 
             let pos = rotated * scale + origin;
 
-            // Small center region: vertices very close to the origin in
-            // *rotated* space get the center sphere color instead
-            let abs_rotated = rotated.abs();
-            let dist_from_origin = abs_rotated.length();
-            let center_threshold_local = 1.5; // in FBX local units
+            result.push(GizmoVertex {
+                position: [pos.x, pos.y, pos.z],
+                color,
+            });
+        }
+    }
 
-            let final_color = if dist_from_origin < center_threshold_local && is_center_active {
-                [1.0, 1.0, 1.0, 1.0]
-            } else {
-                color
-            };
+    // -- Center sphere from FBX (GizmosSphere) --
+    // Render the sphere at the gizmo origin with white/gray coloring.
+    // The FBX sphere has a radius of ~1.0 in Blender units. We scale it
+    // to match the procedural gizmo's center sphere size (0.17 * gizmo_scale).
+    if let (Some(sp_verts), Some(sp_indices)) = (sphere_vertices, sphere_indices) {
+        let center_color = if is_center_active {
+            [1.0, 1.0, 1.0, 1.0]       // bright white when hovered/active
+        } else {
+            [0.85, 0.85, 0.85, 1.0]    // light gray normally
+        };
+
+        // The FBX sphere radius is ~1.0. Match the procedural center sphere:
+        // center_radius = gizmo_scale * 0.17 → sphere_scale = gizmo_scale * 0.17
+        let sphere_scale = gizmo_scale * 0.17;
+
+        for &idx in sp_indices.iter() {
+            let i = idx as usize;
+            if i >= sp_verts.len() {
+                continue;
+            }
+            let v = &sp_verts[i];
+            let local = Vec3::from(v.position);
+
+            // Apply Blender Z-up → engine Y-up: (x, y, z) → (x, z, y)
+            let engine_pos = Vec3::new(local.x, local.z, local.y);
+
+            let pos = engine_pos * sphere_scale + origin;
 
             result.push(GizmoVertex {
                 position: [pos.x, pos.y, pos.z],
-                color: final_color,
+                color: center_color,
             });
         }
     }
