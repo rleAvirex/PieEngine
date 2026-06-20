@@ -14,18 +14,22 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
 };
 
-/// Fullscreen triangle vertex shader — generates a triangle that covers
-/// the entire screen using the trick: vertex ID 0,1,2 maps to positions
-/// that form a full-screen quad with a single triangle.
+/// Fullscreen triangle vertex shader using the well-known trick.
+/// Generates a single triangle that covers the entire viewport:
+///   vertex 0: position (-1, -1), uv (0, 1)   — bottom-left
+///   vertex 1: position ( 3, -1), uv (2, 1)   — bottom-right (far right)
+///   vertex 2: position (-1,  3), uv (0, -1)   — top-left (far top)
+/// The rasterizer clips to the viewport, effectively producing a full-screen quad.
 @vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOutput {
     var output: VertexOutput;
-    // Fullscreen triangle: covers [-1,1] clip space
-    let x = f32(i32(vertex_index & 1u) * 2 - 1);
-    let y = f32(i32(vertex_index >> 1u) * 2 - 1);
+    // Map vertex index to clip-space position:
+    // vid=0 → (-1,-1), vid=1 → (3,-1), vid=2 → (-1,3)
+    let x = -1.0 + f32(vid & 1u) * 4.0;
+    let y = -1.0 + f32(vid >> 1u) * 4.0;
     output.clip_position = vec4<f32>(x, y, 0.0, 1.0);
-    // UV: flip Y so texture is right-side up
-    output.uv = vec2<f32>(f32(i32(vertex_index & 1u)), 1.0 - f32(i32(vertex_index >> 1u)));
+    // UV: maps the visible viewport (0,0)-(1,1), Y-flipped for texture
+    output.uv = vec2<f32>(f32(vid & 1u) * 2.0, 1.0 - f32(vid >> 1u) * 2.0);
     return output;
 }
 
