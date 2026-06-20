@@ -19,6 +19,8 @@ pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 gltf = "1.4"
 image = "0.25"
+flate2 = "1"
+serde_json = "1"
 
 [profile.release]
 lto = "fat"

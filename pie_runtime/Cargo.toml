@@ -15,6 +15,8 @@ ctrlc.workspace = true
 hecs.workspace = true
 gltf.workspace = true
 image.workspace = true
+flate2.workspace = true
+serde_json.workspace = true
 bytemuck.workspace = true
 winit = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }

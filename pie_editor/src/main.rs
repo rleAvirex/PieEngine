@@ -20,7 +20,8 @@ use egui_winit::State as EguiWinitState;
 use glam::{Vec2, Vec3};
 use hecs::Entity;
 use pie_runtime::assets::{
-    AssetRegistry, load_gltf_scene, spawn_imported_scene,
+    AssetRegistry, load_fbx_meshes, load_gltf_scene, load_pie_meshes_from_dir,
+    spawn_imported_scene,
 };
 use pie_runtime::components::{Camera, Transform};
 use pie_runtime::core::RuntimeApp;
@@ -153,6 +154,46 @@ impl EditorScene {
                     scene_path.display()
                 );
                 bootstrap_fallback_render_scene(runtime.simulation_mut(), &mut registry);
+            }
+        }
+
+        // Load engine gizmo models from FBX (or pre-converted .bin files).
+        // These are loaded into the registry so they're available as assets,
+        // but they are not spawned as scene entities — the gizmo overlay
+        // uses its own procedural mesh with per-vertex color instead.
+        let engine_assets = runtime.config().assets_root.join("Engine/Gizmos");
+        if engine_assets.exists() {
+            // Try loading from FBX directly first
+            for fbx_name in &["GizmosMoveTool", "GizmosSphere"] {
+                let fbx_path = engine_assets.join(format!("{fbx_name}.fbx"));
+                if fbx_path.exists() {
+                    match load_fbx_meshes(&fbx_path, &mut registry) {
+                        Ok(handles) => {
+                            eprintln!(
+                                "pie_editor: loaded {} FBX mesh(es) from {}",
+                                handles.len(),
+                                fbx_path.display()
+                            );
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "pie_editor: warning: failed to load FBX gizmo {}: {error}",
+                                fbx_path.display()
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Also try loading pre-converted .bin/.json pie_mesh files
+            if let Ok(handles) = load_pie_meshes_from_dir(&engine_assets, &mut registry) {
+                if !handles.is_empty() {
+                    eprintln!(
+                        "pie_editor: loaded {} pie_mesh asset(s) from {}",
+                        handles.len(),
+                        engine_assets.display()
+                    );
+                }
             }
         }
 

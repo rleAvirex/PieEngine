@@ -8,6 +8,7 @@ use winit::window::{Window, WindowId};
 
 use crate::assets::{AssetRegistry, load_gltf_scene, spawn_imported_scene};
 use crate::core::RuntimeApp;
+use crate::rendering::loading_screen::LoadingScreen;
 use crate::rendering::renderer::Renderer;
 use crate::rendering::sample_scene::bootstrap_fallback_render_scene;
 
@@ -37,18 +38,28 @@ pub fn load_client_scene(app: &mut RuntimeApp) -> Result<ClientScene, String> {
     Ok(ClientScene { registry })
 }
 
+/// The client application lifecycle phases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientPhase {
+    /// Showing the loading screen while the scene and renderer initialize.
+    Loading,
+    /// Fully initialized — rendering the scene normally.
+    Running,
+}
+
 pub fn run_client_window(mut app: RuntimeApp) -> Result<(), String> {
     app.start();
 
-    let scene = load_client_scene(&mut app)?;
     let assets_root = app.config().assets_root.clone();
     let event_loop = EventLoop::new().map_err(|error| error.to_string())?;
     let mut client = ClientApp {
         runtime: app,
-        scene,
         assets_root,
+        phase: ClientPhase::Loading,
         window: None,
+        loading_screen: None,
         renderer: None,
+        scene: None,
         last_frame_instant: Instant::now(),
     };
 
@@ -61,10 +72,12 @@ pub fn run_client_window(mut app: RuntimeApp) -> Result<(), String> {
 
 struct ClientApp {
     runtime: RuntimeApp,
-    scene: ClientScene,
     assets_root: std::path::PathBuf,
+    phase: ClientPhase,
     window: Option<Arc<Window>>,
+    loading_screen: Option<LoadingScreen>,
     renderer: Option<Renderer>,
+    scene: Option<ClientScene>,
     last_frame_instant: Instant,
 }
 
@@ -84,14 +97,13 @@ impl ApplicationHandler for ClientApp {
                 .expect("window should be created"),
         );
 
-        let mut renderer =
-            Renderer::new(window.clone(), &self.assets_root).expect("renderer should initialize");
-        renderer
-            .load_scene(&self.scene.registry, self.runtime.simulation())
-            .expect("scene assets should upload to GPU");
+        // Create the loading screen — this sets up the GPU and shows a
+        // progress indicator immediately, before loading any scene assets.
+        let loading_screen = LoadingScreen::new(window.clone())
+            .expect("loading screen should initialize");
 
         self.window = Some(window);
-        self.renderer = Some(renderer);
+        self.loading_screen = Some(loading_screen);
         self.request_redraw();
     }
 
@@ -107,8 +119,17 @@ impl ApplicationHandler for ClientApp {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
-                if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.resize(size.width, size.height);
+                match self.phase {
+                    ClientPhase::Loading => {
+                        if let Some(loading) = self.loading_screen.as_mut() {
+                            loading.resize(size.width, size.height);
+                        }
+                    }
+                    ClientPhase::Running => {
+                        if let Some(renderer) = self.renderer.as_mut() {
+                            renderer.resize(size.width, size.height);
+                        }
+                    }
                 }
                 self.request_redraw();
             }
@@ -121,23 +142,9 @@ impl ApplicationHandler for ClientApp {
 
                 self.runtime.update(delta_seconds);
 
-                if let Some(renderer) = self.renderer.as_mut() {
-                    match renderer.render(self.runtime.simulation()) {
-                        Ok(()) => {}
-                        Err(wgpu::SurfaceError::Lost) => {
-                            if let Some(window) = self.window.as_ref() {
-                                let size = window.inner_size();
-                                renderer.resize(size.width, size.height);
-                            }
-                        }
-                        Err(wgpu::SurfaceError::OutOfMemory) => {
-                            self.runtime.shutdown();
-                            event_loop.exit();
-                        }
-                        Err(error) => {
-                            eprintln!("pie_runtime: render error: {error:?}");
-                        }
-                    }
+                match self.phase {
+                    ClientPhase::Loading => self.render_loading_frame(event_loop),
+                    ClientPhase::Running => self.render_scene_frame(event_loop),
                 }
 
                 self.request_redraw();
@@ -151,6 +158,97 @@ impl ClientApp {
     fn request_redraw(&self) {
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
+        }
+    }
+
+    /// Render a loading screen frame. On the first call, this transitions
+    /// to the running phase after loading the scene.
+    fn render_loading_frame(&mut self, event_loop: &ActiveEventLoop) {
+        // Update loading screen progress
+        if let Some(loading) = self.loading_screen.as_mut() {
+            loading.set_progress(0.2, "Loading scene...");
+            match loading.render() {
+                Ok(()) => {}
+                Err(wgpu::SurfaceError::Lost) => {
+                    if let Some(window) = self.window.as_ref() {
+                        let size = window.inner_size();
+                        loading.resize(size.width, size.height);
+                    }
+                }
+                Err(wgpu::SurfaceError::OutOfMemory) => {
+                    self.runtime.shutdown();
+                    event_loop.exit();
+                }
+                Err(error) => {
+                    eprintln!("pie_runtime: loading screen render error: {error:?}");
+                }
+            }
+        }
+
+        // Transition to running phase: load the scene and create the full renderer.
+        // This happens after the first loading frame so the user sees the loading screen.
+        self.transition_to_running();
+    }
+
+    /// Load the scene and create the full renderer, transitioning from the
+    /// loading screen to the running phase.
+    fn transition_to_running(&mut self) {
+        // Load the scene
+        let scene = match load_client_scene(&mut self.runtime) {
+            Ok(scene) => scene,
+            Err(error) => {
+                eprintln!("pie_runtime: failed to load scene: {error}");
+                return;
+            }
+        };
+
+        // Update loading screen to show we're creating the renderer
+        if let Some(loading) = self.loading_screen.as_mut() {
+            loading.set_progress(0.8, "Initializing renderer...");
+            let _ = loading.render();
+        }
+
+        // Create the full renderer (reuses the same window)
+        let window = self.window.clone().expect("window should exist during transition");
+        let mut renderer = match Renderer::new(window, &self.assets_root) {
+            Ok(r) => r,
+            Err(error) => {
+                eprintln!("pie_runtime: failed to create renderer: {error}");
+                return;
+            }
+        };
+
+        if let Err(error) = renderer.load_scene(&scene.registry, self.runtime.simulation()) {
+            eprintln!("pie_runtime: failed to load scene into renderer: {error}");
+            return;
+        }
+
+        // Transition complete
+        self.loading_screen = None;
+        self.renderer = Some(renderer);
+        self.scene = Some(scene);
+        self.phase = ClientPhase::Running;
+    }
+
+    /// Render a normal scene frame using the full renderer.
+    fn render_scene_frame(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(renderer) = self.renderer.as_mut() {
+            match renderer.render(self.runtime.simulation()) {
+                Ok(()) => {}
+                Err(wgpu::SurfaceError::Lost) => {
+                    if let Some(window) = self.window.as_ref() {
+                        let size = window.inner_size();
+                        renderer.resize(size.width, size.height);
+                    }
+                }
+                Err(wgpu::SurfaceError::OutOfMemory) => {
+                    self.runtime.shutdown();
+                    event_loop.exit();
+                }
+                Err(error) => {
+                    eprintln!("pie_runtime: render error: {error:?}");
+                }
+            }
         }
     }
 }

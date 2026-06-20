@@ -2248,11 +2248,13 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "ctrlc",
+ "flate2",
  "glam",
  "gltf",
  "hecs",
  "image",
  "pollster",
+ "serde_json",
  "wgpu",
  "winit",
 ]

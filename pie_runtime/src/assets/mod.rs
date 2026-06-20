@@ -15,8 +15,10 @@ pub use handle::{
 };
 #[cfg(feature = "cooked-assets")]
 pub use loader::pak::load_pak;
+pub use loader::fbx::{load_fbx_mesh, load_fbx_meshes};
 pub use loader::gltf::{ImportedNode, ImportedScene, load_gltf_scene};
 pub use loader::image::{load_texture_from_path, texture_from_rgba};
+pub use loader::pie_mesh::{load_pie_mesh, load_pie_meshes_from_dir};
 pub use loader::shader::{load_shader_named, load_shader_source, shader_asset_path};
 pub use material::MaterialAsset;
 pub use mesh::{MeshAsset, MeshVertex};

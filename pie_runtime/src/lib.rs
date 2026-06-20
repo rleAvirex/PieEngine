@@ -9,7 +9,8 @@ pub mod rendering;
 
 pub use assets::{
     AssetError, AssetRegistry, Handle, ImportedScene, MaterialAsset, MaterialHandle, MeshAsset,
-    MeshHandle, MeshVertex, SpawnedScene, TextureAsset, TextureHandle, load_gltf_scene,
+    MeshHandle, MeshVertex, SpawnedScene, TextureAsset, TextureHandle, load_fbx_mesh,
+    load_fbx_meshes, load_gltf_scene, load_pie_mesh, load_pie_meshes_from_dir,
     load_shader_named, load_shader_source, load_texture_from_path, spawn_imported_scene,
 };
 pub use components::{ActiveCamera, Camera, MeshRenderer, Name, Transform, Velocity};
