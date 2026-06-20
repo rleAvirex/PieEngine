@@ -62,6 +62,8 @@ pub enum GizmoState {
     Dragging {
         axis: Axis,
         entity_start_pos: Vec3,
+        /// Accumulated world-space offset along the drag axis.
+        total_world_delta: f32,
     },
 }
 

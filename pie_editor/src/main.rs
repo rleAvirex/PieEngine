@@ -754,7 +754,7 @@ impl ApplicationHandler for EditorApp {
                 self.apply_camera_to_runtime();
 
                 // ---- Gizmo drag update ----
-                if let GizmoState::Dragging { axis, entity_start_pos } = self.gizmo_state {
+                if let GizmoState::Dragging { axis, entity_start_pos, total_world_delta } = self.gizmo_state {
                     if let Some((dx, dy)) = commands.gizmo_drag_delta {
                         let cam_transform = self
                             .runtime
@@ -778,11 +778,13 @@ impl ApplicationHandler for EditorApp {
 
                         let dist = (cam_transform.translation - entity_start_pos).length();
                         let sensitivity = dist * 0.003;
-                        let world_delta =
+                        let frame_delta =
                             (dx * axis_screen_x + dy * axis_screen_y) * sensitivity;
 
+                        let new_total = total_world_delta + frame_delta;
+
                         if let Some(entity) = self.selected_entity {
-                            let new_translation = entity_start_pos + axis_dir * world_delta;
+                            let new_translation = entity_start_pos + axis_dir * new_total;
                             if let Ok(mut transform) = self
                                 .runtime
                                 .simulation_mut()
@@ -791,6 +793,11 @@ impl ApplicationHandler for EditorApp {
                             {
                                 transform.translation = new_translation;
                             }
+                            self.gizmo_state = GizmoState::Dragging {
+                                axis,
+                                entity_start_pos,
+                                total_world_delta: new_total,
+                            };
                             self.apply_camera_to_runtime();
                             needs_redraw = true;
                         }
@@ -854,6 +861,7 @@ impl ApplicationHandler for EditorApp {
                                     self.gizmo_state = GizmoState::Dragging {
                                         axis,
                                         entity_start_pos: transform.translation,
+                                        total_world_delta: 0.0,
                                     };
                                     needs_redraw = true;
                             }
