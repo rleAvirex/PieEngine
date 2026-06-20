@@ -33,7 +33,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window as WinitWindow, WindowId};
 
 use fly_camera::{EditorCamera, SPEED_SCROLL_FACTOR};
-use gizmo::{Axis, GizmoState, PickResult, gizmo_axis_aabb, gizmo_screen_scale, gizmo_tip_aabb};
+use gizmo::{Axis, GizmoState, PickResult, gizmo_screen_scale, gizmo_shaft_aabb, gizmo_tip_aabb};
 use picking::{PickableBounds, ray_aabb_hit, world_aabb, screen_ray_from_ndc, viewport_ndc_from_rect};
 use viewport_renderer::{EditorViewportRenderer, EditorViewportTexture};
 use ui::{EditorCommands, EditorSceneInfo, EditorUiParams, build_editor_ui};
@@ -507,20 +507,19 @@ impl EditorApp {
         if let Some(origin) = gizmo_origin {
             let dist = (camera_transform.translation - origin).length();
             let scale = gizmo_screen_scale(dist, viewport_size.1);
-            // The visual_radius is the larger of shaft_half_width and cone_radius,
-            // matching the proportions in build_gizmo_mesh.
-            let visual_radius = scale * 0.09; // cone_radius is the largest dimension
             for axis in Axis::ALL {
-                let (axis_min, axis_max) =
-                    gizmo_axis_aabb(origin, axis, scale, visual_radius);
-                if let Some(t) = ray_aabb_hit(ray_origin, ray_dir, axis_min, axis_max)
+                // Shaft region — starts past the center cube, generous perpendicular margin
+                let (shaft_min, shaft_max) =
+                    gizmo_shaft_aabb(origin, axis, scale);
+                if let Some(t) = ray_aabb_hit(ray_origin, ray_dir, shaft_min, shaft_max)
                     && t < best_t
                 {
                         best_t = t;
                         best_result = Some(PickResult::GizmoAxis(axis));
                 }
+                // Tip region — cone arrowhead
                 let (tip_min, tip_max) =
-                    gizmo_tip_aabb(origin, axis, scale, visual_radius);
+                    gizmo_tip_aabb(origin, axis, scale);
                 if let Some(t) = ray_aabb_hit(ray_origin, ray_dir, tip_min, tip_max)
                     && t < best_t
                 {

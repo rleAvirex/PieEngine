@@ -330,25 +330,33 @@ fn push_tri(verts: &mut Vec<GizmoVertex>, a: Vec3, b: Vec3, c: Vec3, color: [f32
 }
 
 // ---------------------------------------------------------------------------
-// Pick AABB helpers — sized to match visual geometry + generous margin
+// Pick AABB helpers — separate shaft and tip regions with dead zone at center
 // ---------------------------------------------------------------------------
 
-/// Build a world-space AABB around the full gizmo axis (shaft + cone) for ray-picking.
-/// `visual_radius` should be the larger of shaft_half_width and cone_radius,
-/// then we add a generous margin for easy clicking.
-pub fn gizmo_axis_aabb(origin: Vec3, axis: Axis, length: f32, visual_radius: f32) -> (Vec3, Vec3) {
+/// Build a world-space AABB around the gizmo axis **shaft** for ray-picking.
+///
+/// The shaft starts just past the center cube (dead zone) and ends where
+/// the cone begins. The perpendicular margin is generous so thin shafts
+/// are easy to click.
+pub fn gizmo_shaft_aabb(origin: Vec3, axis: Axis, gizmo_scale: f32) -> (Vec3, Vec3) {
     let dir = axis.direction();
-    let end = origin + dir * length;
-    let margin = visual_radius * 5.0; // 5× visual size for comfortable picking
+    // Skip the center cube area — this is the "dead zone" so clicking the
+    // center diamond doesn't accidentally grab an axis.
+    let shaft_start_offset = gizmo_scale * 0.06;
+    let shaft_end_offset = gizmo_scale * 0.75; // cone starts at ~0.75
+    let start = origin + dir * shaft_start_offset;
+    let end = origin + dir * shaft_end_offset;
+    // Perpendicular margin: generous for easy clicking on the thin shaft.
+    let margin = gizmo_scale * 0.08;
     let half = Vec3::splat(margin);
-    let min = origin.min(end) - half;
-    let max = origin.max(end) + half;
+    let min = start.min(end) - half;
+    let max = start.max(end) + half;
     (min, max)
 }
 
 /// Build a world-space AABB around the gizmo cone tip for easier picking.
-pub fn gizmo_tip_aabb(origin: Vec3, axis: Axis, length: f32, visual_radius: f32) -> (Vec3, Vec3) {
-    let tip = origin + axis.direction() * length;
-    let ext = Vec3::splat(visual_radius * 6.0);
+pub fn gizmo_tip_aabb(origin: Vec3, axis: Axis, gizmo_scale: f32) -> (Vec3, Vec3) {
+    let tip = origin + axis.direction() * gizmo_scale;
+    let ext = Vec3::splat(gizmo_scale * 0.15);
     (tip - ext, tip + ext)
 }
