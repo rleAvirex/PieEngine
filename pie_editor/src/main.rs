@@ -33,7 +33,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window as WinitWindow, WindowId};
 
 use fly_camera::{EditorCamera, SPEED_SCROLL_FACTOR};
-use gizmo::{Axis, GizmoState, GIZMO_PICK_THICKNESS, PickResult, gizmo_axis_aabb, gizmo_tip_aabb};
+use gizmo::{Axis, GizmoState, PickResult, gizmo_axis_aabb, gizmo_screen_scale, gizmo_tip_aabb};
 use picking::{PickableBounds, ray_aabb_hit, world_aabb, screen_ray_from_ndc, viewport_ndc_from_rect};
 use viewport_renderer::{EditorViewportRenderer, EditorViewportTexture};
 use ui::{EditorCommands, EditorSceneInfo, EditorUiParams, build_editor_ui};
@@ -188,6 +188,7 @@ struct EditorApp {
     pickables: Vec<PickableBounds>,
     viewport_hovered: bool,
     gizmo_state: GizmoState,
+    hovered_axis: Option<Axis>,
 }
 
 impl EditorApp {
@@ -231,6 +232,7 @@ impl EditorApp {
             pickables,
             viewport_hovered: false,
             gizmo_state: GizmoState::default(),
+            hovered_axis: None,
         }
     }
 
@@ -414,12 +416,17 @@ impl EditorApp {
             return;
         };
 
+        let viewport_height = viewport_texture.size[1] as f32;
+
         viewport_renderer.render_to_view(
             self.runtime.simulation(),
             &viewport_texture.view,
             viewport_texture.size,
             selection_aabb,
             gizmo_origin,
+            self.hovered_axis,
+            self.gizmo_state,
+            viewport_height,
         );
     }
 
@@ -499,10 +506,13 @@ impl EditorApp {
         // Test gizmo axes first (they take priority).
         if let Some(origin) = gizmo_origin {
             let dist = (camera_transform.translation - origin).length();
-            let scale = (dist * 0.15).clamp(0.4, 4.0);
+            let scale = gizmo_screen_scale(dist, viewport_size.1);
+            // The visual_radius is the larger of shaft_half_width and cone_radius,
+            // matching the proportions in build_gizmo_mesh.
+            let visual_radius = scale * 0.09; // cone_radius is the largest dimension
             for axis in Axis::ALL {
                 let (axis_min, axis_max) =
-                    gizmo_axis_aabb(origin, axis, scale, GIZMO_PICK_THICKNESS);
+                    gizmo_axis_aabb(origin, axis, scale, visual_radius);
                 if let Some(t) = ray_aabb_hit(ray_origin, ray_dir, axis_min, axis_max)
                     && t < best_t
                 {
@@ -510,7 +520,7 @@ impl EditorApp {
                         best_result = Some(PickResult::GizmoAxis(axis));
                 }
                 let (tip_min, tip_max) =
-                    gizmo_tip_aabb(origin, axis, scale, GIZMO_PICK_THICKNESS);
+                    gizmo_tip_aabb(origin, axis, scale, visual_radius);
                 if let Some(t) = ray_aabb_hit(ray_origin, ray_dir, tip_min, tip_max)
                     && t < best_t
                 {
@@ -788,6 +798,32 @@ impl ApplicationHandler for EditorApp {
                     if commands.gizmo_drag_end {
                         self.gizmo_state = GizmoState::Idle;
                     }
+                }
+
+                // ---- Gizmo hover detection (every frame) ----
+                self.hovered_axis = None;
+                if let (Some(rect), Some(hover_pos)) =
+                    (commands.viewport_rect, commands.viewport_hover_pos)
+                    && !matches!(self.gizmo_state, GizmoState::Dragging { .. })
+                    && let Some(ndc) = viewport_ndc_from_rect(rect, hover_pos)
+                {
+                        let gizmo_origin = self.selected_entity.and_then(|entity| {
+                            self.runtime
+                                .simulation()
+                                .world()
+                                .get::<&Transform>(entity)
+                                .ok()
+                                .map(|t| t.translation)
+                        });
+                        if let Some(PickResult::GizmoAxis(axis)) =
+                            self.pick_viewport(ndc, (rect.width(), rect.height()), gizmo_origin)
+                        {
+                            self.hovered_axis = Some(axis);
+                        }
+                }
+                // While dragging, keep the dragged axis highlighted.
+                if let Some(axis) = self.gizmo_state.dragged_axis() {
+                    self.hovered_axis = Some(axis);
                 }
 
                 // ---- Viewport picking (entity or gizmo) ----

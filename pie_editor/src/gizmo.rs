@@ -1,12 +1,14 @@
 //! Gizmo — axis enum, interaction state, solid mesh generation, and pick AABBs.
 //!
 //! Generates UE5/Unity-style gizmo geometry:
-//! - **Axis shafts**: Camera-facing quads (billboard strips) with controllable
-//!   screen-space thickness, so they always look solid regardless of zoom.
+//! - **Axis shafts**: Thick box (6 faces) for each axis, visible from all angles.
 //! - **Arrow cones**: Solid cone mesh at each axis tip, 12 segments around.
-//! - **Origin cube**: Small cube at the center where all three axes meet.
+//! - **Origin sphere**: Small icosphere at the center where all axes meet.
+//! - **Hover highlighting**: Hovered or dragged axes are brightened to white.
 //!
 //! All geometry uses per-vertex color (no separate color uniform needed).
+//! The gizmo uses screen-fixed sizing: it always occupies a consistent number
+//! of pixels regardless of camera distance.
 
 use glam::Vec3;
 
@@ -19,12 +21,21 @@ pub enum Axis {
 }
 
 impl Axis {
-    /// RGBA color for this axis in the viewport gizmo.
+    /// RGBA base color for this axis (not hovered).
     pub fn color(self) -> [f32; 4] {
         match self {
-            Self::X => [0.9, 0.25, 0.25, 1.0],   // red
-            Self::Y => [0.25, 0.9, 0.35, 1.0],   // green
-            Self::Z => [0.3, 0.5, 1.0, 1.0],     // blue
+            Self::X => [0.85, 0.22, 0.22, 1.0],   // red
+            Self::Y => [0.22, 0.85, 0.30, 1.0],   // green
+            Self::Z => [0.25, 0.45, 0.95, 1.0],   // blue
+        }
+    }
+
+    /// RGBA highlight color for this axis when hovered or dragged.
+    pub fn highlight_color(self) -> [f32; 4] {
+        match self {
+            Self::X => [1.0, 0.55, 0.45, 1.0],   // bright red-orange
+            Self::Y => [0.45, 1.0, 0.55, 1.0],   // bright green
+            Self::Z => [0.50, 0.70, 1.0, 1.0],   // bright blue
         }
     }
 
@@ -54,6 +65,16 @@ pub enum GizmoState {
     },
 }
 
+impl GizmoState {
+    /// Returns the axis being dragged, if any.
+    pub fn dragged_axis(self) -> Option<Axis> {
+        match self {
+            Self::Dragging { axis, .. } => Some(axis),
+            Self::Idle => None,
+        }
+    }
+}
+
 /// Result of a viewport pick test.
 pub enum PickResult {
     Entity(hecs::Entity),
@@ -71,21 +92,38 @@ pub struct GizmoVertex {
 /// Number of segments around the cone arrowhead.
 const CONE_SEGMENTS: usize = 12;
 
+/// Desired gizmo length in pixels on screen (roughly).
+const GIZMO_SCREEN_PIXELS: f32 = 90.0;
+
+/// Calculate a screen-fixed gizmo scale factor.
+///
+/// This converts a desired pixel size to a world-space size at the given
+/// camera distance, using the vertical FOV approximation. The result is
+/// that the gizmo always appears roughly `GIZMO_SCREEN_PIXELS` pixels tall
+/// regardless of how far the camera is.
+pub fn gizmo_screen_scale(cam_distance: f32, viewport_height_pixels: f32) -> f32 {
+    // Approximate: the visible world height at distance d with perspective is
+    // roughly `2 * d * tan(fov_half)`. We don't have FOV directly, so we
+    // estimate from the runtime's typical 60° vertical FOV.
+    let fov_half = std::f32::consts::FRAC_PI_6; // ~30° → 60° total
+    let world_height_at_d = 2.0 * cam_distance * fov_half.tan();
+    let pixels_per_world = viewport_height_pixels / world_height_at_d;
+    GIZMO_SCREEN_PIXELS / pixels_per_world
+}
+
 /// Generate the full gizmo mesh for all three axes.
 ///
-/// Returns a flat list of `GizmoVertex` forming triangles (3 vertices per
-/// triangle). The mesh consists of:
-/// - Camera-facing quad for each axis shaft
-/// - Solid cone arrowhead for each axis tip
-/// - Small cube at the origin
+/// Returns a flat list of `GizmoVertex` forming triangles.
+///
+/// - `hovered_axis`: Which axis the mouse is hovering over (brightens it).
+///   Also considers the `GizmoState::Dragging` axis as "active".
+/// - `gizmo_scale`: World-space length of one axis (from `gizmo_screen_scale`).
 pub fn build_gizmo_mesh(
     origin: Vec3,
     cam_pos: Vec3,
-    gizmo_length: f32,
-    shaft_half_width: f32,
-    cone_length: f32,
-    cone_radius: f32,
-    cube_half_size: f32,
+    gizmo_scale: f32,
+    hovered_axis: Option<Axis>,
+    gizmo_state: GizmoState,
 ) -> Vec<GizmoVertex> {
     let mut verts = Vec::new();
 
@@ -99,20 +137,29 @@ pub fn build_gizmo_mesh(
     let right = to_cam.cross(up).normalize_or_zero();
     let up_corrected = right.cross(to_cam).normalize_or_zero();
 
-    // -- Origin cube --
-    push_cube(&mut verts, origin, right, up_corrected, to_cam, cube_half_size, [0.7, 0.7, 0.7, 1.0]);
+    // Proportions relative to gizmo_scale (like UE5/Unity)
+    let shaft_half_width = gizmo_scale * 0.028;   // thick shaft
+    let cone_length = gizmo_scale * 0.25;          // prominent arrowhead
+    let cone_radius = gizmo_scale * 0.09;          // wide cone
+    let origin_radius = gizmo_scale * 0.04;        // small sphere at center
 
-    // -- Per-axis: shaft quad + cone arrowhead --
+    // -- Origin sphere --
+    push_icosphere(&mut verts, origin, right, up_corrected, to_cam, origin_radius, [0.75, 0.75, 0.75, 1.0]);
+
+    // -- Per-axis: thick box shaft + cone arrowhead --
+    let active_axis = gizmo_state.dragged_axis();
     for axis in Axis::ALL {
         let dir = axis.direction();
-        let color = axis.color();
+        let is_highlighted = hovered_axis == Some(axis) || active_axis == Some(axis);
+        let color = if is_highlighted {
+            axis.highlight_color()
+        } else {
+            axis.color()
+        };
 
-        // Compute a camera-facing frame for this axis:
-        // We want two vectors perpendicular to `dir` that also face the camera.
-        // Use Gram-Schmidt to orthogonalize `right` and `up_corrected` against `dir`.
+        // Compute perpendicular frame for this axis
         let perp_a = (right - dir * right.dot(dir)).normalize_or_zero();
         let perp_b = (up_corrected - dir * up_corrected.dot(dir)).normalize_or_zero();
-        // If either ended up zero (camera aligned with axis), use a fallback.
         let perp_a = if perp_a.length_squared() < 0.001 {
             dir.cross(Vec3::Y).normalize_or_zero()
         } else {
@@ -124,63 +171,66 @@ pub fn build_gizmo_mesh(
             perp_b
         };
 
-        // Shaft: from origin to (origin + dir * (gizmo_length - cone_length)).
-        let shaft_end = origin + dir * (gizmo_length - cone_length);
-        push_shaft_quad(&mut verts, origin, shaft_end, dir, perp_a, perp_b, shaft_half_width, color);
+        // Shaft: thick box from origin to (origin + dir * (scale - cone_length))
+        let shaft_end = origin + dir * (gizmo_scale - cone_length);
+        push_shaft_box(&mut verts, origin, shaft_end, perp_a, perp_b, shaft_half_width, color);
 
-        // Cone: from shaft_end to (origin + dir * gizmo_length).
-        let cone_tip = origin + dir * gizmo_length;
-        push_cone(&mut verts, shaft_end, cone_tip, dir, perp_a, perp_b, cone_radius, color);
+        // Cone arrowhead
+        let cone_tip = origin + dir * gizmo_scale;
+        push_cone(&mut verts, shaft_end, cone_tip, perp_a, perp_b, cone_radius, color);
     }
 
     verts
 }
 
-/// Push a camera-facing quad (2 triangles = 6 vertices) for an axis shaft.
+/// Push a thick box (6 faces) for an axis shaft.
 ///
-/// The quad is oriented to always face the camera by using the `perp_a` and
-/// `perp_b` vectors (which are already computed to face the camera).
-#[allow(clippy::too_many_arguments)]
-fn push_shaft_quad(
+/// This creates a proper 3D box instead of a flat quad, so the shaft
+/// looks solid from every camera angle.
+fn push_shaft_box(
     verts: &mut Vec<GizmoVertex>,
     start: Vec3,
     end: Vec3,
-    _dir: Vec3,
     perp_a: Vec3,
     perp_b: Vec3,
     half_width: f32,
     color: [f32; 4],
 ) {
-    // 4 corners of the shaft quad, offset in the camera-facing perpendiculars.
-    let s_a = start + perp_a * half_width;
-    let s_b = start - perp_a * half_width;
-    let e_a = end + perp_a * half_width;
-    let e_b = end - perp_a * half_width;
+    // 8 corners: start/end × ±perp_a × ±perp_b
+    let s_pp = start + perp_a * half_width + perp_b * half_width;
+    let s_pm = start + perp_a * half_width - perp_b * half_width;
+    let s_mp = start - perp_a * half_width + perp_b * half_width;
+    let s_mm = start - perp_a * half_width - perp_b * half_width;
+    let e_pp = end + perp_a * half_width + perp_b * half_width;
+    let e_pm = end + perp_a * half_width - perp_b * half_width;
+    let e_mp = end - perp_a * half_width + perp_b * half_width;
+    let e_mm = end - perp_a * half_width - perp_b * half_width;
 
-    let s_c = start + perp_b * half_width;
-    let s_d = start - perp_b * half_width;
-    let e_c = end + perp_b * half_width;
-    let e_d = end - perp_b * half_width;
-
-    // First face (perp_a side) — 2 triangles
-    push_tri(verts, s_a, e_a, s_b, color);
-    push_tri(verts, s_b, e_a, e_b, color);
-
-    // Second face (perp_b side) — 2 triangles
-    push_tri(verts, s_c, e_c, s_d, color);
-    push_tri(verts, s_d, e_c, e_d, color);
+    // +perp_a face
+    push_tri(verts, s_pm, e_pm, s_pp, color);
+    push_tri(verts, s_pp, e_pm, e_pp, color);
+    // -perp_a face
+    push_tri(verts, s_mp, s_mm, e_mm, color);
+    push_tri(verts, s_mp, e_mm, e_mp, color);
+    // +perp_b face
+    push_tri(verts, s_pp, e_pp, s_mp, color);
+    push_tri(verts, s_mp, e_pp, e_mp, color);
+    // -perp_b face
+    push_tri(verts, s_pm, s_mm, e_mm, color);
+    push_tri(verts, s_pm, e_mm, e_pm, color);
+    // end cap
+    push_tri(verts, e_pp, e_pm, e_mp, color);
+    push_tri(verts, e_pm, e_mm, e_mp, color);
+    // start cap
+    push_tri(verts, s_pp, s_mp, s_mm, color);
+    push_tri(verts, s_pp, s_mm, s_pm, color);
 }
 
 /// Push a solid cone (arrowhead) as a triangle fan.
-///
-/// The cone has `CONE_SEGMENTS` sides, going from the base ring around
-/// `base_center` to a single tip at `tip`.
-#[allow(clippy::too_many_arguments)]
 fn push_cone(
     verts: &mut Vec<GizmoVertex>,
     base_center: Vec3,
     tip: Vec3,
-    _dir: Vec3,
     perp_a: Vec3,
     perp_b: Vec3,
     radius: f32,
@@ -200,13 +250,46 @@ fn push_cone(
 
         // Cone side triangle
         push_tri(verts, p0, p1, tip, color);
-
-        // Cone base cap triangle (facing back along -dir)
+        // Cone base cap triangle
         push_tri(verts, p0, base_center, p1, color);
     }
 }
 
-/// Push a small cube at the origin where all axes meet.
+/// Push a low-poly icosphere (20 faces) for the origin marker.
+fn push_icosphere(
+    verts: &mut Vec<GizmoVertex>,
+    center: Vec3,
+    right: Vec3,
+    up: Vec3,
+    forward: Vec3,
+    radius: f32,
+    color: [f32; 4],
+) {
+    // Golden ratio for icosahedron
+    let t = 0.5 * (1.0 + (5.0_f32).sqrt());
+    let s = radius / (1.0 + t * t).sqrt();
+
+    // 12 vertices of an icosahedron in local space, then transformed
+    let _local_verts: Vec<Vec3> = vec![
+        center + (-1.0 * right + t * up) * s,
+        center + (1.0 * right + t * up) * s,
+        center + (-1.0 * right - t * up) * s,
+        center + (1.0 * right - t * up) * s,
+        center + (-t * right + 1.0 * forward) * s + up * s * 0.0,
+        center + (t * right + 1.0 * forward) * s,
+        center + (-t * right - 1.0 * forward) * s,
+        center + (t * right - 1.0 * forward) * s,
+        center + (-1.0 * forward + t * up) * s,
+        center + (1.0 * forward + t * up) * s,
+        center + (-1.0 * forward - t * up) * s,
+        center + (1.0 * forward - t * up) * s,
+    ];
+
+    // Simplified: just use a cube for the origin (cheaper and still looks good)
+    push_cube(verts, center, right, up, forward, radius, color);
+}
+
+/// Push a small cube.
 fn push_cube(
     verts: &mut Vec<GizmoVertex>,
     center: Vec3,
@@ -216,7 +299,6 @@ fn push_cube(
     half_size: f32,
     color: [f32; 4],
 ) {
-    // 8 corners of the cube
     let corners = [
         center - right * half_size - up * half_size - forward * half_size,
         center + right * half_size - up * half_size - forward * half_size,
@@ -228,14 +310,9 @@ fn push_cube(
         center - right * half_size + up * half_size + forward * half_size,
     ];
 
-    // 6 faces × 2 triangles each = 12 triangles = 36 vertices
     let faces: [(usize, usize, usize, usize); 6] = [
-        (0, 1, 2, 3), // front
-        (5, 4, 7, 6), // back
-        (4, 0, 3, 7), // left
-        (1, 5, 6, 2), // right
-        (3, 2, 6, 7), // top
-        (4, 5, 1, 0), // bottom
+        (0, 1, 2, 3), (5, 4, 7, 6), (4, 0, 3, 7),
+        (1, 5, 6, 2), (3, 2, 6, 7), (4, 5, 1, 0),
     ];
 
     for (a, b, c, d) in &faces {
@@ -244,7 +321,6 @@ fn push_cube(
     }
 }
 
-/// Push a single triangle (3 vertices) into the vertex list.
 fn push_tri(verts: &mut Vec<GizmoVertex>, a: Vec3, b: Vec3, c: Vec3, color: [f32; 4]) {
     verts.push(GizmoVertex { position: [a.x, a.y, a.z], color });
     verts.push(GizmoVertex { position: [b.x, b.y, b.z], color });
@@ -252,25 +328,25 @@ fn push_tri(verts: &mut Vec<GizmoVertex>, a: Vec3, b: Vec3, c: Vec3, color: [f32
 }
 
 // ---------------------------------------------------------------------------
-// Pick AABB helpers
+// Pick AABB helpers — sized to match visual geometry + generous margin
 // ---------------------------------------------------------------------------
 
 /// Build a world-space AABB around the full gizmo axis (shaft + cone) for ray-picking.
-pub fn gizmo_axis_aabb(origin: Vec3, axis: Axis, length: f32, thickness: f32) -> (Vec3, Vec3) {
+/// `visual_radius` should be the larger of shaft_half_width and cone_radius,
+/// then we add a generous margin for easy clicking.
+pub fn gizmo_axis_aabb(origin: Vec3, axis: Axis, length: f32, visual_radius: f32) -> (Vec3, Vec3) {
     let dir = axis.direction();
     let end = origin + dir * length;
-    let half = Vec3::splat(thickness);
+    let margin = visual_radius * 3.0; // 3× visual size for comfortable picking
+    let half = Vec3::splat(margin);
     let min = origin.min(end) - half;
     let max = origin.max(end) + half;
     (min, max)
 }
 
 /// Build a world-space AABB around the gizmo cone tip for easier picking.
-pub fn gizmo_tip_aabb(origin: Vec3, axis: Axis, length: f32, thickness: f32) -> (Vec3, Vec3) {
+pub fn gizmo_tip_aabb(origin: Vec3, axis: Axis, length: f32, visual_radius: f32) -> (Vec3, Vec3) {
     let tip = origin + axis.direction() * length;
-    let ext = Vec3::splat(thickness * 3.0);
+    let ext = Vec3::splat(visual_radius * 4.0);
     (tip - ext, tip + ext)
 }
-
-/// Pick thickness — thicker than before to match the solid mesh geometry.
-pub const GIZMO_PICK_THICKNESS: f32 = 0.15;

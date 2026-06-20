@@ -13,7 +13,7 @@ use pie_runtime::components::{DirectionalLight, Transform};
 use pie_runtime::rendering::{CameraUniform, camera_view_proj};
 use wgpu::util::DeviceExt;
 
-use crate::gizmo::{GizmoVertex, build_gizmo_mesh};
+use crate::gizmo::{Axis, GizmoState, GizmoVertex, build_gizmo_mesh, gizmo_screen_scale};
 use crate::theme;
 
 // ---------------------------------------------------------------------------
@@ -478,7 +478,17 @@ impl EditorViewportRenderer {
         Ok(EditorGpuMaterial { _buffer: buffer.clone(), bind_group, _texture: base_color_view.map(|t| t.texture), _normal_texture: normal_gpu })
     }
 
-    pub fn render_to_view(&mut self, simulation: &pie_runtime::core::SimulationCore, view: &wgpu::TextureView, size: [u32; 2], selection_aabb: Option<(Vec3, Vec3)>, gizmo_origin: Option<Vec3>) {
+    pub fn render_to_view(
+        &mut self,
+        simulation: &pie_runtime::core::SimulationCore,
+        view: &wgpu::TextureView,
+        size: [u32; 2],
+        selection_aabb: Option<(Vec3, Vec3)>,
+        gizmo_origin: Option<Vec3>,
+        hovered_axis: Option<Axis>,
+        gizmo_state: GizmoState,
+        viewport_height: f32,
+    ) {
         if size[0] == 0 || size[1] == 0 { return; }
         if self.depth_size != size {
             let (dt, dtv) = create_editor_depth_texture(self.device.as_ref(), size[0], size[1]);
@@ -540,15 +550,9 @@ impl EditorViewportRenderer {
             if let Some(origin) = gizmo_origin {
                 let cam_pos = simulation.active_camera().and_then(|e| simulation.world().get::<&Transform>(e).ok()).map(|t| t.translation).unwrap_or(Vec3::new(0.0, 1.0, 5.0));
                 let dist = (cam_pos - origin).length();
-                let scale = (dist * 0.15).clamp(0.4, 4.0);
+                let scale = gizmo_screen_scale(dist, viewport_height);
 
-                // UE5/Unity-style gizmo proportions
-                let shaft_half_width = scale * 0.012;
-                let cone_length = scale * 0.2;
-                let cone_radius = scale * 0.06;
-                let cube_half = scale * 0.025;
-
-                let gizmo_verts = build_gizmo_mesh(origin, cam_pos, scale, shaft_half_width, cone_length, cone_radius, cube_half);
+                let gizmo_verts = build_gizmo_mesh(origin, cam_pos, scale, hovered_axis, gizmo_state);
                 if !gizmo_verts.is_empty() && gizmo_verts.len() <= self.gizmo_vertex_capacity {
                     let bytes: &[u8] = bytemuck::cast_slice(&gizmo_verts);
                     self.queue.as_ref().write_buffer(&self.gizmo_vertex_buffer, 0, bytes);
