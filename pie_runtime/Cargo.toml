@@ -1,0 +1,21 @@
+[package]
+name = "pie_runtime"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[features]
+default = ["rendering"]
+rendering = ["dep:winit", "dep:wgpu", "dep:pollster"]
+cooked-assets = []
+
+[dependencies]
+glam.workspace = true
+ctrlc.workspace = true
+hecs.workspace = true
+gltf.workspace = true
+image.workspace = true
+bytemuck.workspace = true
+winit = { workspace = true, optional = true }
+wgpu = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
