@@ -1,0 +1,10 @@
+/Users/nikitas/Documents/trae_projects/PieEngine/target/debug/deps/wgpu_types-61020fa86ba74179.d: /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/lib.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/assertions.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/counters.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/env.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/instance.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/math.rs
+
+/Users/nikitas/Documents/trae_projects/PieEngine/target/debug/deps/libwgpu_types-61020fa86ba74179.rmeta: /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/lib.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/assertions.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/counters.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/env.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/instance.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/math.rs
+
+/Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/lib.rs:
+/Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/assertions.rs:
+/Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/counters.rs:
+/Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/env.rs:
+/Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/instance.rs:
+/Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-types-24.0.0/src/math.rs:

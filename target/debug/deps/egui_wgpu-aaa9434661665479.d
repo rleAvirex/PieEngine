@@ -1,0 +1,11 @@
+/Users/nikitas/Documents/trae_projects/PieEngine/target/debug/deps/egui_wgpu-aaa9434661665479.d: /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/lib.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/renderer.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/setup.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/capture.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/winit.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/egui.wgsl /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/texture_copy.wgsl
+
+/Users/nikitas/Documents/trae_projects/PieEngine/target/debug/deps/libegui_wgpu-aaa9434661665479.rmeta: /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/lib.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/renderer.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/setup.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/capture.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/winit.rs /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/egui.wgsl /Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/texture_copy.wgsl
+
+/Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/lib.rs:
+/Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/renderer.rs:
+/Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/setup.rs:
+/Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/capture.rs:
+/Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/winit.rs:
+/Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/egui.wgsl:
+/Users/nikitas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-wgpu-0.31.1/src/texture_copy.wgsl:

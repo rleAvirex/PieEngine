@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check *)",
+      "Bash(cargo tree *)",
+      "Bash(cargo search *)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(cargo info *)",
+      "Bash(cargo test *)",
+      "Bash(cargo run *)",
+      "Bash(cargo build *)",
+      "Bash(ls -la /tmp/pie_build/assets.pak)",
+      "Read(//private/tmp/pie_build/**)"
+    ]
+  }
+}
