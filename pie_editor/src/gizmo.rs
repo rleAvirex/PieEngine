@@ -352,3 +352,87 @@ pub fn gizmo_center_aabb(origin: Vec3, gizmo_scale: f32) -> (Vec3, Vec3) {
     let ext = Vec3::splat(gizmo_scale * 0.22);
     (origin - ext, origin + ext)
 }
+
+// ---------------------------------------------------------------------------
+// FBX gizmo mesh conversion — turn loaded FBX meshes into GizmoVertex data
+// ---------------------------------------------------------------------------
+
+/// Convert an FBX-loaded mesh (MeshVertex format) into GizmoVertex triangles
+/// with axis-based coloring.
+///
+/// Each vertex is colored based on which axis it aligns with most:
+/// - Primarily along +X or -X → red (X axis)
+/// - Primarily along +Y or -Y → green (Y axis)
+/// - Primarily along +Z or -Z → blue (Z axis)
+/// - Near the origin → white (center sphere)
+///
+/// The `hovered_axis`, `hovered_center`, and `gizmo_state` parameters
+/// control highlighting, same as `build_gizmo_mesh`.
+pub fn build_fbx_gizmo_mesh(
+    origin: Vec3,
+    vertices: &[pie_runtime::assets::MeshVertex],
+    indices: &[u32],
+    gizmo_scale: f32,
+    hovered_axis: Option<Axis>,
+    hovered_center: bool,
+    gizmo_state: GizmoState,
+) -> Vec<GizmoVertex> {
+    let active_axis = gizmo_state.dragged_axis();
+    let is_center_active = hovered_center || matches!(gizmo_state, GizmoState::UniformScaling { .. });
+
+    let mut result = Vec::with_capacity(indices.len());
+
+    // Compute AABB for center detection
+    let center_threshold = gizmo_scale * 0.2;
+
+    for chunk in indices.chunks_exact(3) {
+        let i0 = chunk[0] as usize;
+        let i1 = chunk[1] as usize;
+        let i2 = chunk[2] as usize;
+
+        if i0 >= vertices.len() || i1 >= vertices.len() || i2 >= vertices.len() {
+            continue;
+        }
+
+        for &idx in &[i0, i1, i2] {
+            let v = &vertices[idx];
+            let pos = Vec3::from(v.position) * gizmo_scale + origin;
+
+            // Determine which axis this vertex belongs to
+            let abs_pos = Vec3::from(v.position).abs();
+            let dist_from_origin = abs_pos.length();
+
+            let color = if dist_from_origin < center_threshold {
+                // Center sphere
+                if is_center_active {
+                    [1.0, 1.0, 1.0, 1.0]
+                } else {
+                    [0.85, 0.85, 0.85, 1.0]
+                }
+            } else {
+                // Determine dominant axis by position
+                let dominant = if abs_pos.x >= abs_pos.y && abs_pos.x >= abs_pos.z {
+                    Axis::X
+                } else if abs_pos.y >= abs_pos.x && abs_pos.y >= abs_pos.z {
+                    Axis::Y
+                } else {
+                    Axis::Z
+                };
+
+                let is_highlighted = hovered_axis == Some(dominant) || active_axis == Some(dominant);
+                if is_highlighted {
+                    dominant.highlight_color()
+                } else {
+                    dominant.color()
+                }
+            };
+
+            result.push(GizmoVertex {
+                position: [pos.x, pos.y, pos.z],
+                color,
+            });
+        }
+    }
+
+    result
+}

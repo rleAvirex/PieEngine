@@ -22,7 +22,7 @@ use hecs::Entity;
 use pie_runtime::assets::{
     AssetRegistry, load_fbx_meshes, load_gltf_scene, spawn_imported_scene,
 };
-use pie_runtime::components::{Camera, MeshRenderer, Name, Transform};
+use pie_runtime::components::{Camera, Transform};
 use pie_runtime::core::RuntimeApp;
 use pie_runtime::init_logging;
 use pie_runtime::rendering::camera_view_proj;
@@ -156,8 +156,10 @@ impl EditorScene {
             }
         }
 
-        // Load engine gizmo models from FBX and spawn them as visible entities.
+        // Load engine gizmo models from FBX into the asset registry.
         // Falls back to pre-converted .bin/.json pie_mesh files if FBX fails.
+        // These meshes are NOT spawned as scene entities — they are used by the
+        // gizmo overlay renderer via EditorViewportRenderer::load_fbx_gizmos().
         let engine_assets = runtime.config().assets_root.join("Engine/Gizmos");
         if engine_assets.exists() {
             for fbx_name in &["GizmosMoveTool", "GizmosSphere"] {
@@ -166,40 +168,20 @@ impl EditorScene {
                     match load_fbx_meshes(&fbx_path, &mut registry) {
                         Ok(handles) => {
                             eprintln!(
-                                "pie_editor: loaded {} FBX mesh(es) from {}",
+                                "pie_editor: loaded {} FBX gizmo mesh(es) from {}",
                                 handles.len(),
                                 fbx_path.display()
                             );
-                            // Spawn each mesh as a visible entity in the scene
-                            for (i, mesh_handle) in handles.into_iter().enumerate() {
-                                let entity_name = if i == 0 {
-                                    fbx_name.to_string()
-                                } else {
-                                    format!("{}_geo{}", fbx_name, i)
-                                };
-                                runtime.simulation_mut().world_mut().spawn((
-                                    Name::new(entity_name),
-                                    Transform::default(),
-                                    MeshRenderer { mesh: mesh_handle },
-                                ));
-                            }
                         }
                         Err(error) => {
                             // FBX failed — try the pre-converted .bin file
                             let bin_path = engine_assets.join(format!("{fbx_name}.bin"));
                             if bin_path.exists() {
                                 match pie_runtime::assets::load_pie_mesh(&bin_path, &mut registry) {
-                                    Ok(handle) => {
-                                        eprintln!(
-                                            "pie_editor: loaded fallback pie_mesh from {}",
-                                            bin_path.display()
-                                        );
-                                        runtime.simulation_mut().world_mut().spawn((
-                                            Name::new(fbx_name.to_string()),
-                                            Transform::default(),
-                                            MeshRenderer { mesh: handle },
-                                        ));
-                                    }
+                                    Ok(_) => eprintln!(
+                                        "pie_editor: loaded fallback pie_mesh gizmo from {}",
+                                        bin_path.display()
+                                    ),
                                     Err(bin_err) => eprintln!(
                                         "pie_editor: warning: FBX and pie_mesh both failed for {}: {error}, {bin_err}",
                                         fbx_name
@@ -345,6 +327,7 @@ impl EditorApp {
             viewport_renderer
                 .load_scene(&self.scene.registry, self.runtime.simulation())
                 .expect("editor viewport scene should reload");
+            viewport_renderer.load_fbx_gizmos(&self.scene.registry);
         }
         let (editor_camera, pickables) =
             Self::init_camera_and_pickables(&self.runtime, &self.scene);
@@ -377,6 +360,7 @@ impl EditorApp {
             viewport_renderer
                 .load_scene(&self.scene.registry, self.runtime.simulation())
                 .map_err(std::io::Error::other)?;
+            viewport_renderer.load_fbx_gizmos(&self.scene.registry);
             self.viewport_renderer = Some(viewport_renderer);
         }
 

@@ -13,7 +13,7 @@ use pie_runtime::components::{Camera, DirectionalLight, Transform};
 use pie_runtime::rendering::{CameraUniform, camera_view_proj};
 use wgpu::util::DeviceExt;
 
-use crate::gizmo::{Axis, GizmoState, GizmoVertex, GIZMO_WORLD_SCALE, build_gizmo_mesh};
+use crate::gizmo::{Axis, GizmoState, GizmoVertex, GIZMO_WORLD_SCALE, build_fbx_gizmo_mesh, build_gizmo_mesh};
 use crate::theme;
 
 // ---------------------------------------------------------------------------
@@ -150,6 +150,10 @@ pub struct EditorViewportRenderer {
     gizmo_camera_bind_group: wgpu::BindGroup,
     gizmo_vertex_buffer: wgpu::Buffer,
     gizmo_vertex_capacity: usize,
+    /// FBX-loaded gizmo mesh data (vertices + indices) for the move/translate gizmo.
+    fbx_gizmo_move: Option<(Vec<pie_runtime::assets::MeshVertex>, Vec<u32>)>,
+    /// FBX-loaded gizmo mesh data for the scale/sphere gizmo.
+    fbx_gizmo_sphere: Option<(Vec<pie_runtime::assets::MeshVertex>, Vec<u32>)>,
 }
 
 impl EditorViewportRenderer {
@@ -428,7 +432,41 @@ impl EditorViewportRenderer {
             line_pipeline, line_camera_buffer, line_camera_bind_group, line_color_buffer, line_color_bind_group,
             line_vertex_buffer,
             gizmo_pipeline, gizmo_camera_buffer, gizmo_camera_bind_group, gizmo_vertex_buffer, gizmo_vertex_capacity: GIZMO_MAX_VERTICES,
+            fbx_gizmo_move: None, fbx_gizmo_sphere: None,
         })
+    }
+
+    /// Load FBX gizmo meshes from the asset registry into the renderer.
+    ///
+    /// Looks for meshes named "GizmosMoveTool_geo0" and "GizmosSphere_geo0"
+    /// (the names assigned by the FBX loader) and stores their vertex/index
+    /// data for use in the gizmo overlay instead of the procedural mesh.
+    pub fn load_fbx_gizmos(&mut self, registry: &AssetRegistry) {
+        for mesh in registry.meshes() {
+            let (target, name) = if mesh.name.starts_with("GizmosMoveTool") {
+                (&mut self.fbx_gizmo_move, &mesh.name)
+            } else if mesh.name.starts_with("GizmosSphere") {
+                (&mut self.fbx_gizmo_sphere, &mesh.name)
+            } else {
+                continue;
+            };
+
+            // Resize gizmo vertex buffer if needed
+            let gizmo_vert_count = mesh.indices.len();
+            if gizmo_vert_count > self.gizmo_vertex_capacity {
+                let new_capacity = gizmo_vert_count.next_power_of_two();
+                self.gizmo_vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("gizmo vertex buffer (resized)"),
+                    size: (new_capacity * std::mem::size_of::<GizmoVertex>()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                self.gizmo_vertex_capacity = new_capacity;
+            }
+
+            *target = Some((mesh.vertices.clone(), mesh.indices.clone()));
+            eprintln!("pie_editor: loaded FBX gizmo mesh '{}' ({} verts, {} indices)", name, mesh.vertices.len(), mesh.indices.len());
+        }
     }
 
     pub fn load_scene(&mut self, registry: &AssetRegistry, simulation: &pie_runtime::core::SimulationCore) -> Result<(), String> {
@@ -552,7 +590,12 @@ impl EditorViewportRenderer {
                 let cam_pos = simulation.active_camera().and_then(|e| simulation.world().get::<&Transform>(e).ok()).map(|t| t.translation).unwrap_or(Vec3::new(0.0, 1.0, 5.0));
                 let scale = GIZMO_WORLD_SCALE;
 
-                let gizmo_verts = build_gizmo_mesh(origin, cam_pos, scale, hovered_axis, hovered_center, gizmo_state);
+                // Use FBX gizmo mesh if loaded, otherwise fall back to procedural
+                let gizmo_verts = if let Some((ref verts, ref indices)) = self.fbx_gizmo_move {
+                    build_fbx_gizmo_mesh(origin, verts, indices, scale, hovered_axis, hovered_center, gizmo_state)
+                } else {
+                    build_gizmo_mesh(origin, cam_pos, scale, hovered_axis, hovered_center, gizmo_state)
+                };
                 if !gizmo_verts.is_empty() && gizmo_verts.len() <= self.gizmo_vertex_capacity {
                     let bytes: &[u8] = bytemuck::cast_slice(&gizmo_verts);
                     self.queue.as_ref().write_buffer(&self.gizmo_vertex_buffer, 0, bytes);
