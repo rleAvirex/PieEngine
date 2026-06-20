@@ -357,10 +357,19 @@ pub fn gizmo_center_aabb(origin: Vec3, gizmo_scale: f32) -> (Vec3, Vec3) {
 // FBX gizmo mesh conversion — turn loaded FBX meshes into GizmoVertex data
 // ---------------------------------------------------------------------------
 
+/// Scale factor to bring FBX gizmo models down to the editor gizmo size.
+/// The FBX models are authored at ~1 unit per axis; the procedural gizmo
+/// uses GIZMO_WORLD_SCALE (0.5). Dividing by 20 makes the FBX gizmo match.
+const FBX_GIZMO_SCALE_DIVISOR: f32 = 20.0;
+
 /// Convert an FBX-loaded mesh (MeshVertex format) into GizmoVertex triangles
 /// with axis-based coloring.
 ///
-/// Each vertex is colored based on which axis it aligns with most:
+/// Blender exports FBX with Z-up convention, but our engine uses Y-up.
+/// This function applies a -90° rotation around X to convert:
+///   Blender (x, y, z) → Engine (x, -z, y)
+///
+/// Each vertex is then colored based on which axis it aligns with most:
 /// - Primarily along +X or -X → red (X axis)
 /// - Primarily along +Y or -Y → green (Y axis)
 /// - Primarily along +Z or -Z → blue (Z axis)
@@ -380,10 +389,14 @@ pub fn build_fbx_gizmo_mesh(
     let active_axis = gizmo_state.dragged_axis();
     let is_center_active = hovered_center || matches!(gizmo_state, GizmoState::UniformScaling { .. });
 
+    // Final scale: procedural gizmo scale divided by the FBX divisor
+    let scale = gizmo_scale / FBX_GIZMO_SCALE_DIVISOR;
+
     let mut result = Vec::with_capacity(indices.len());
 
-    // Compute AABB for center detection
-    let center_threshold = gizmo_scale * 0.2;
+    // Vertices near the origin (within this threshold) are colored as the
+    // center sphere rather than an axis.
+    let center_threshold = gizmo_scale * 0.15;
 
     for chunk in indices.chunks_exact(3) {
         let i0 = chunk[0] as usize;
@@ -396,13 +409,19 @@ pub fn build_fbx_gizmo_mesh(
 
         for &idx in &[i0, i1, i2] {
             let v = &vertices[idx];
-            let pos = Vec3::from(v.position) * gizmo_scale + origin;
+            let local = Vec3::from(v.position);
 
-            // Determine which axis this vertex belongs to
-            let abs_pos = Vec3::from(v.position).abs();
-            let dist_from_origin = abs_pos.length();
+            // Rotate from Blender Z-up to engine Y-up: (x, y, z) → (x, -z, y)
+            let rotated = Vec3::new(local.x, -local.z, local.y);
 
-            let color = if dist_from_origin < center_threshold {
+            // Scale and translate to world position
+            let pos = rotated * scale + origin;
+
+            // Color based on the *rotated* position (engine axes)
+            let abs_rotated = rotated.abs();
+            let dist_from_origin = abs_rotated.length();
+
+            let color = if dist_from_origin * scale < center_threshold {
                 // Center sphere
                 if is_center_active {
                     [1.0, 1.0, 1.0, 1.0]
@@ -410,10 +429,10 @@ pub fn build_fbx_gizmo_mesh(
                     [0.85, 0.85, 0.85, 1.0]
                 }
             } else {
-                // Determine dominant axis by position
-                let dominant = if abs_pos.x >= abs_pos.y && abs_pos.x >= abs_pos.z {
+                // Determine dominant axis by the rotated position
+                let dominant = if abs_rotated.x >= abs_rotated.y && abs_rotated.x >= abs_rotated.z {
                     Axis::X
-                } else if abs_pos.y >= abs_pos.x && abs_pos.y >= abs_pos.z {
+                } else if abs_rotated.y >= abs_rotated.x && abs_rotated.y >= abs_rotated.z {
                     Axis::Y
                 } else {
                     Axis::Z
