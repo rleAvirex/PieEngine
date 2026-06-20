@@ -1,0 +1,25 @@
+# PieEngine Built-in Assets
+#
+# This directory contains engine-internal assets that ship with the editor.
+# They are NOT user scene assets — they are UI/editor primitives like
+# gizmo meshes, default textures, and built-in shaders.
+#
+# Directory structure:
+#   assets/Engine/
+#   ├── manifest.toml          ← this file
+#   ├── Gizmos/                ← gizmo tool meshes
+#   │   ├── GizmosMoveTool.fbx ← translate gizmo (3-axis arrows + center sphere)
+#   │   └── GizmosSphere.fbx   ← uniform scale handle (center sphere)
+#   └── ...                    ← future engine assets (grid, icons, etc.)
+
+[assets.gizmo_move_tool]
+path = "Gizmos/GizmosMoveTool.fbx"
+description = "3-axis translation gizmo with arrow shafts and center sphere"
+category = "gizmo"
+tool = "translate"
+
+[assets.gizmo_sphere]
+path = "Gizmos/GizmosSphere.fbx"
+description = "Uniform scale handle sphere for the center of the gizmo"
+category = "gizmo"
+tool = "scale_uniform"
