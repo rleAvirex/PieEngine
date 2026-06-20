@@ -1,0 +1,535 @@
+//! Editor viewport renderer — GPU pipeline, mesh/texture/material upload, and rendering.
+
+use std::path::Path;
+use std::sync::Arc;
+
+use egui::TextureId;
+use glam::{Mat4, Vec3};
+use hecs::Entity;
+use pie_runtime::assets::{
+    AssetRegistry, MaterialAsset, MaterialHandle, MeshAsset, MeshVertex, load_shader_named,
+};
+use pie_runtime::components::{DirectionalLight, Transform};
+use pie_runtime::rendering::{CameraUniform, camera_view_proj};
+use wgpu::util::DeviceExt;
+
+use crate::gizmo::{Axis, build_gizmo_vertices};
+use crate::theme;
+
+// ---------------------------------------------------------------------------
+// Depth texture helpers
+// ---------------------------------------------------------------------------
+
+pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+fn create_editor_depth_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("editor viewport depth texture"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+// ---------------------------------------------------------------------------
+// Viewport texture
+// ---------------------------------------------------------------------------
+
+pub struct EditorViewportTexture {
+    pub texture: wgpu::Texture,
+    pub view: wgpu::TextureView,
+    pub texture_id: TextureId,
+    pub size: [u32; 2],
+}
+
+// ---------------------------------------------------------------------------
+// GPU types
+// ---------------------------------------------------------------------------
+
+struct EditorGpuMaterial {
+    _buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    _texture: Option<wgpu::Texture>,
+    _normal_texture: Option<wgpu::Texture>,
+}
+
+struct EditorGpuDrawable {
+    entity: Entity,
+    mesh: EditorGpuMesh,
+    material: MaterialHandle,
+}
+
+struct EditorGpuMesh {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct EditorModelUniform {
+    model: [[f32; 4]; 4],
+    normal_matrix: [[f32; 4]; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct EditorMaterialUniform {
+    base_color_factor: [f32; 4],
+    parameters: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct EditorLightUniform {
+    direction: [f32; 4],
+    color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct LineCameraUniform {
+    view_proj: [[f32; 4]; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct LineColorUniform {
+    color: [f32; 4],
+}
+
+const LINE_VERTEX_COUNT: usize = 24;
+
+struct UploadedEditorTexture {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+// ---------------------------------------------------------------------------
+// EditorViewportRenderer
+// ---------------------------------------------------------------------------
+
+pub struct EditorViewportRenderer {
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+    pipeline: wgpu::RenderPipeline,
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
+    model_buffer: wgpu::Buffer,
+    model_bind_group: wgpu::BindGroup,
+    light_buffer: wgpu::Buffer,
+    light_bind_group: wgpu::BindGroup,
+    material_bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    #[allow(dead_code)]
+    fallback_texture: wgpu::Texture,
+    fallback_texture_view: wgpu::TextureView,
+    materials: std::collections::HashMap<MaterialHandle, EditorGpuMaterial>,
+    drawables: Vec<EditorGpuDrawable>,
+    depth_texture: wgpu::Texture,
+    depth_texture_view: wgpu::TextureView,
+    depth_size: [u32; 2],
+    line_pipeline: wgpu::RenderPipeline,
+    line_camera_buffer: wgpu::Buffer,
+    line_camera_bind_group: wgpu::BindGroup,
+    line_color_buffer: wgpu::Buffer,
+    line_color_bind_group: wgpu::BindGroup,
+    line_vertex_buffer: wgpu::Buffer,
+    gizmo_vertex_buffer: wgpu::Buffer,
+    gizmo_vertex_capacity: usize,
+}
+
+impl EditorViewportRenderer {
+    pub fn new(render_state: &egui_wgpu::RenderState, assets_root: &Path) -> Result<Self, String> {
+        let device = Arc::new(render_state.device.clone());
+        let queue = Arc::new(render_state.queue.clone());
+        let target_format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+        let shader_source =
+            load_shader_named(assets_root, "textured_mesh").map_err(|e| e.to_string())?;
+        let shader = device.as_ref().create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("editor viewport shader"),
+            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+        });
+
+        let camera_bgl = device.as_ref().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("editor viewport camera bind group layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0, visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            }],
+        });
+
+        let model_bgl = device.as_ref().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("editor viewport model bind group layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0, visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            }],
+        });
+
+        let texture_bgl = device.as_ref().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("editor viewport material bind group layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+            ],
+        });
+
+        let light_bgl = device.as_ref().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("editor viewport light bind group layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            }],
+        });
+
+        let pipeline_layout = device.as_ref().create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("editor viewport pipeline layout"),
+            bind_group_layouts: &[&camera_bgl, &model_bgl, &light_bgl, &texture_bgl],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.as_ref().create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("editor viewport pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader, entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<MeshVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress, shader_location: 1 },
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress, shader_location: 2 },
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: (std::mem::size_of::<[f32; 3]>() * 2 + std::mem::size_of::<[f32; 2]>()) as wgpu::BufferAddress, shader_location: 3 },
+                    ],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState { format: target_format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, strip_index_format: None, front_face: wgpu::FrontFace::Ccw, cull_mode: Some(wgpu::Face::Back), unclipped_depth: false, polygon_mode: wgpu::PolygonMode::Fill, conservative: false },
+            depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH_FORMAT, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::Less, stencil: wgpu::StencilState::default(), bias: wgpu::DepthBiasState::default() }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None, cache: None,
+        });
+
+        let camera_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("editor viewport camera buffer"), size: std::mem::size_of::<CameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+        });
+        let camera_bind_group = device.as_ref().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("editor viewport camera bind group"), layout: &camera_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() }],
+        });
+
+        let model_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("editor viewport model buffer"), size: std::mem::size_of::<EditorModelUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+        });
+        let model_bind_group = device.as_ref().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("editor viewport model bind group"), layout: &model_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: model_buffer.as_entire_binding() }],
+        });
+
+        let light_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("editor viewport light buffer"), size: std::mem::size_of::<EditorLightUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+        });
+        let light_bind_group = device.as_ref().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("editor viewport light bind group"), layout: &light_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: light_buffer.as_entire_binding() }],
+        });
+
+        let sampler = device.as_ref().create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("editor viewport sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat, address_mode_v: wgpu::AddressMode::Repeat, address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let fallback_texture = device.as_ref().create_texture(&wgpu::TextureDescriptor {
+            label: Some("editor viewport fallback texture"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &fallback_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &[255, 255, 255, 255],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let fallback_texture_view = fallback_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let (depth_texture, depth_texture_view) = create_editor_depth_texture(&device, 1, 1);
+
+        // Line pipeline
+        let line_shader_source = load_shader_named(assets_root, "debug_line").map_err(|e| e.to_string())?;
+        let line_shader = device.as_ref().create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("editor viewport line shader"),
+            source: wgpu::ShaderSource::Wgsl(line_shader_source.into()),
+        });
+
+        let line_cam_bgl = device.as_ref().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("editor viewport line camera bind group layout"),
+            entries: &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None }],
+        });
+        let line_color_bgl = device.as_ref().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("editor viewport line color bind group layout"),
+            entries: &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None }],
+        });
+
+        let line_pipeline_layout = device.as_ref().create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("editor viewport line pipeline layout"),
+            bind_group_layouts: &[&line_cam_bgl, &line_color_bgl], push_constant_ranges: &[],
+        });
+
+        let line_pipeline = device.as_ref().create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("editor viewport line pipeline"), layout: Some(&line_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &line_shader, entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress, step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 }],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &line_shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState { format: target_format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::LineList, strip_index_format: None, front_face: wgpu::FrontFace::Ccw, cull_mode: None, unclipped_depth: false, polygon_mode: wgpu::PolygonMode::Fill, conservative: false },
+            depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH_FORMAT, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::Less, stencil: wgpu::StencilState::default(), bias: wgpu::DepthBiasState::default() }),
+            multisample: wgpu::MultisampleState::default(), multiview: None, cache: None,
+        });
+
+        let line_camera_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("editor viewport line camera buffer"), size: std::mem::size_of::<LineCameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+        });
+        let line_camera_bind_group = device.as_ref().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("editor viewport line camera bind group"), layout: &line_cam_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: line_camera_buffer.as_entire_binding() }],
+        });
+
+        let line_color_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("editor viewport line color buffer"), size: std::mem::size_of::<LineColorUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+        });
+        let line_color_bind_group = device.as_ref().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("editor viewport line color bind group"), layout: &line_color_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: line_color_buffer.as_entire_binding() }],
+        });
+
+        let line_vertex_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("editor viewport line vertex buffer"), size: (std::mem::size_of::<[f32; 3]>() * LINE_VERTEX_COUNT) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+        });
+
+        const GIZMO_MAX_VERTICES: usize = 64;
+        let gizmo_vertex_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("editor viewport gizmo vertex buffer"), size: (std::mem::size_of::<[f32; 3]>() * GIZMO_MAX_VERTICES) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+        });
+
+        Ok(Self {
+            device, queue, pipeline, camera_buffer, camera_bind_group, model_buffer, model_bind_group,
+            light_buffer, light_bind_group, material_bind_group_layout: texture_bgl, sampler,
+            fallback_texture, fallback_texture_view, materials: std::collections::HashMap::new(),
+            drawables: Vec::new(), depth_texture, depth_texture_view, depth_size: [1, 1],
+            line_pipeline, line_camera_buffer, line_camera_bind_group, line_color_buffer, line_color_bind_group,
+            line_vertex_buffer, gizmo_vertex_buffer, gizmo_vertex_capacity: GIZMO_MAX_VERTICES,
+        })
+    }
+
+    pub fn load_scene(&mut self, registry: &AssetRegistry, simulation: &pie_runtime::core::SimulationCore) -> Result<(), String> {
+        self.materials.clear();
+        let mut drawables = Vec::new();
+        for (entity, mesh_renderer) in simulation.world().query::<&pie_runtime::components::MeshRenderer>().iter() {
+            let mesh = registry.mesh(mesh_renderer.mesh).map_err(|e| e.to_string())?;
+            let material = registry.material(mesh.material).map_err(|e| e.to_string())?;
+            if !self.materials.contains_key(&mesh.material) {
+                self.materials.insert(mesh.material, self.upload_material(registry, material)?);
+            }
+            drawables.push(EditorGpuDrawable { entity, mesh: upload_editor_mesh(self.device.as_ref(), mesh), material: mesh.material });
+        }
+        self.drawables = drawables;
+        Ok(())
+    }
+
+    fn upload_material(&self, registry: &AssetRegistry, material: &MaterialAsset) -> Result<EditorGpuMaterial, String> {
+        let uniform = EditorMaterialUniform { base_color_factor: material.base_color_factor, parameters: [material.metallic_factor, material.roughness_factor, 0.0, 0.0] };
+        let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("editor viewport material buffer"), contents: bytemuck::bytes_of(&uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let base_color_view = if let Some(th) = material.base_color_texture {
+            Some(upload_editor_texture(self.device.as_ref(), self.queue.as_ref(), registry.texture(th).map_err(|e| e.to_string())?))
+        } else { None };
+
+        let (normal_gpu, normal_view) = if let Some(nh) = material.normal_texture {
+            let up = upload_editor_texture(self.device.as_ref(), self.queue.as_ref(), registry.texture(nh).map_err(|e| e.to_string())?);
+            (Some(up.texture), Some(up.view))
+        } else { (None, None) };
+
+        let base_color_view_ref = base_color_view.as_ref().map(|t| &t.view).unwrap_or(&self.fallback_texture_view);
+        let normal_view_ref = normal_view.as_ref().unwrap_or(&self.fallback_texture_view);
+
+        let bind_group = self.device.as_ref().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("editor viewport material bind group"), layout: &self.material_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(base_color_view_ref) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(normal_view_ref) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        });
+
+        Ok(EditorGpuMaterial { _buffer: buffer.clone(), bind_group, _texture: base_color_view.map(|t| t.texture), _normal_texture: normal_gpu })
+    }
+
+    pub fn render_to_view(&mut self, simulation: &pie_runtime::core::SimulationCore, view: &wgpu::TextureView, size: [u32; 2], selection_aabb: Option<(Vec3, Vec3)>, gizmo_origin: Option<Vec3>) {
+        if size[0] == 0 || size[1] == 0 { return; }
+        if self.depth_size != size {
+            let (dt, dtv) = create_editor_depth_texture(self.device.as_ref(), size[0], size[1]);
+            self.depth_texture = dt; self.depth_texture_view = dtv; self.depth_size = size;
+        }
+
+        let aspect = size[0] as f32 / size[1] as f32;
+        let camera_uniform = CameraUniform::from_simulation(simulation, aspect);
+        self.queue.as_ref().write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
+
+        let vp = camera_view_proj(simulation.active_camera().and_then(|e| simulation.world().get::<&Transform>(e).ok()).map(|t| *t).unwrap_or_default(), aspect);
+        self.queue.as_ref().write_buffer(&self.line_camera_buffer, 0, bytemuck::bytes_of(&LineCameraUniform { view_proj: vp.to_cols_array_2d() }));
+
+        let dl = simulation.resource::<DirectionalLight>().copied().unwrap_or_default();
+        self.queue.as_ref().write_buffer(&self.light_buffer, 0, bytemuck::bytes_of(&EditorLightUniform {
+            direction: [dl.direction.x, dl.direction.y, dl.direction.z, 0.0],
+            color: [dl.color.x, dl.color.y, dl.color.z, dl.intensity],
+        }));
+
+        if let Some((min, max)) = selection_aabb {
+            let v = aabb_line_vertices(min, max);
+            self.queue.as_ref().write_buffer(&self.line_vertex_buffer, 0, bytemuck::cast_slice(&v));
+        }
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("editor viewport encoder") });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("editor viewport render pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(theme::VIEWPORT_CLEAR), store: wgpu::StoreOp::Store } })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.depth_texture_view, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
+                timestamp_writes: None, occlusion_query_set: None,
+            });
+
+            rp.set_pipeline(&self.pipeline);
+            rp.set_bind_group(0, &self.camera_bind_group, &[]);
+            rp.set_bind_group(2, &self.light_bind_group, &[]);
+
+            for d in &self.drawables {
+                let t = simulation.world().get::<&Transform>(d.entity).ok().map(|t| *t).unwrap_or_default();
+                let m = Mat4::from_scale_rotation_translation(t.scale, t.rotation, t.translation);
+                self.queue.write_buffer(&self.model_buffer, 0, bytemuck::bytes_of(&EditorModelUniform { model: m.to_cols_array_2d(), normal_matrix: m.inverse().transpose().to_cols_array_2d() }));
+                rp.set_bind_group(1, &self.model_bind_group, &[]);
+                let mat = self.materials.get(&d.material).expect("scene materials should be uploaded before rendering");
+                rp.set_bind_group(3, &mat.bind_group, &[]);
+                rp.set_vertex_buffer(0, d.mesh.vertex_buffer.slice(..));
+                rp.set_index_buffer(d.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..d.mesh.index_count, 0, 0..1);
+            }
+
+            if selection_aabb.is_some() {
+                self.queue.as_ref().write_buffer(&self.line_color_buffer, 0, bytemuck::bytes_of(&LineColorUniform { color: [1.0, 0.85, 0.1, 1.0] }));
+                rp.set_pipeline(&self.line_pipeline);
+                rp.set_bind_group(0, &self.line_camera_bind_group, &[]);
+                rp.set_bind_group(1, &self.line_color_bind_group, &[]);
+                rp.set_vertex_buffer(0, self.line_vertex_buffer.slice(..));
+                rp.draw(0..LINE_VERTEX_COUNT as u32, 0..1);
+            }
+
+            if let Some(origin) = gizmo_origin {
+                let cam_pos = simulation.active_camera().and_then(|e| simulation.world().get::<&Transform>(e).ok()).map(|t| t.translation).unwrap_or(Vec3::new(0.0, 1.0, 5.0));
+                let dist = (cam_pos - origin).length();
+                let scale = (dist * 0.15).clamp(0.4, 4.0);
+                let tip = scale * 0.18;
+                let (gv, counts) = build_gizmo_vertices(origin, cam_pos, scale, tip);
+                if !gv.is_empty() && gv.len() <= self.gizmo_vertex_capacity {
+                    self.queue.as_ref().write_buffer(&self.gizmo_vertex_buffer, 0, bytemuck::cast_slice(&gv));
+                    rp.set_pipeline(&self.line_pipeline);
+                    rp.set_bind_group(0, &self.line_camera_bind_group, &[]);
+                    rp.set_bind_group(1, &self.line_color_bind_group, &[]);
+                    rp.set_vertex_buffer(0, self.gizmo_vertex_buffer.slice(..));
+                    let mut offset = 0u32;
+                    for (i, axis) in Axis::ALL.iter().enumerate() {
+                        self.queue.as_ref().write_buffer(&self.line_color_buffer, 0, bytemuck::bytes_of(&LineColorUniform { color: axis.color() }));
+                        let n = counts[i] as u32;
+                        rp.draw(offset..offset + n, 0..1);
+                        offset += n;
+                    }
+                }
+            }
+        }
+        self.queue.as_ref().submit(std::iter::once(encoder.finish()));
+    }
+}
+
+fn upload_editor_mesh(device: &wgpu::Device, mesh: &MeshAsset) -> EditorGpuMesh {
+    let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("editor viewport mesh vertex buffer"), contents: bytemuck::cast_slice(&mesh.vertices), usage: wgpu::BufferUsages::VERTEX });
+    let ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("editor viewport mesh index buffer"), contents: bytemuck::cast_slice(&mesh.indices), usage: wgpu::BufferUsages::INDEX });
+    EditorGpuMesh { vertex_buffer: vb, index_buffer: ib, index_count: mesh.indices.len() as u32 }
+}
+
+fn upload_editor_texture(device: &wgpu::Device, queue: &wgpu::Queue, texture: &pie_runtime::assets::TextureAsset) -> UploadedEditorTexture {
+    let gt = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("editor viewport loaded texture"), size: wgpu::Extent3d { width: texture.width, height: texture.height, depth_or_array_layers: 1 },
+        mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo { texture: &gt, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        &texture.rgba, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * texture.width), rows_per_image: Some(texture.height) },
+        wgpu::Extent3d { width: texture.width, height: texture.height, depth_or_array_layers: 1 },
+    );
+    let view = gt.create_view(&wgpu::TextureViewDescriptor::default());
+    UploadedEditorTexture { texture: gt, view }
+}
+
+fn aabb_line_vertices(min: Vec3, max: Vec3) -> [[f32; 3]; LINE_VERTEX_COUNT] {
+    let a = min; let g = max;
+    let b = Vec3::new(g.x, a.y, a.z); let c = Vec3::new(g.x, g.y, a.z); let d = Vec3::new(a.x, g.y, a.z);
+    let e = Vec3::new(a.x, a.y, g.z); let f = Vec3::new(g.x, a.y, g.z); let h = Vec3::new(a.x, g.y, g.z);
+    [
+        [a.x,a.y,a.z],[b.x,b.y,b.z],[b.x,b.y,b.z],[c.x,c.y,c.z],[c.x,c.y,c.z],[d.x,d.y,d.z],[d.x,d.y,d.z],[a.x,a.y,a.z],
+        [e.x,e.y,e.z],[f.x,f.y,f.z],[f.x,f.y,f.z],[g.x,g.y,g.z],[g.x,g.y,g.z],[h.x,h.y,h.z],[h.x,h.y,h.z],[e.x,e.y,e.z],
+        [a.x,a.y,a.z],[e.x,e.y,e.z],[b.x,b.y,b.z],[f.x,f.y,f.z],[c.x,c.y,c.z],[g.x,g.y,g.z],[d.x,d.y,d.z],[h.x,h.y,h.z],
+    ]
+}

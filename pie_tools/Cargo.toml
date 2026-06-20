@@ -1,9 +1,0 @@
-[package]
-name = "pie_tools"
-edition.workspace = true
-license.workspace = true
-version.workspace = true
-
-[dependencies]
-clap = { workspace = true }
-pie_runtime = { path = "../pie_runtime" }
