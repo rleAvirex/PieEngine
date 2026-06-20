@@ -13,7 +13,7 @@ use pie_runtime::components::{Camera, DirectionalLight, Transform};
 use pie_runtime::rendering::{CameraUniform, camera_view_proj};
 use wgpu::util::DeviceExt;
 
-use crate::gizmo::{Axis, GizmoState, GizmoVertex, build_gizmo_mesh, gizmo_screen_scale};
+use crate::gizmo::{Axis, GizmoState, GizmoVertex, GIZMO_WORLD_SCALE, build_gizmo_mesh};
 use crate::theme;
 
 // ---------------------------------------------------------------------------
@@ -488,7 +488,6 @@ impl EditorViewportRenderer {
         hovered_axis: Option<Axis>,
         hovered_center: bool,
         gizmo_state: GizmoState,
-        viewport_height: f32,
     ) {
         if size[0] == 0 || size[1] == 0 { return; }
         if self.depth_size != size {
@@ -551,8 +550,7 @@ impl EditorViewportRenderer {
 
             if let Some(origin) = gizmo_origin {
                 let cam_pos = simulation.active_camera().and_then(|e| simulation.world().get::<&Transform>(e).ok()).map(|t| t.translation).unwrap_or(Vec3::new(0.0, 1.0, 5.0));
-                let dist = (cam_pos - origin).length();
-                let scale = gizmo_screen_scale(dist, viewport_height, fov);
+                let scale = GIZMO_WORLD_SCALE;
 
                 let gizmo_verts = build_gizmo_mesh(origin, cam_pos, scale, hovered_axis, hovered_center, gizmo_state);
                 if !gizmo_verts.is_empty() && gizmo_verts.len() <= self.gizmo_vertex_capacity {

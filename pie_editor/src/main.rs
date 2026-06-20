@@ -33,7 +33,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window as WinitWindow, WindowId};
 
 use fly_camera::{EditorCamera, SPEED_SCROLL_FACTOR};
-use gizmo::{Axis, GizmoState, PickResult, gizmo_center_aabb, gizmo_screen_scale, gizmo_shaft_aabb, gizmo_tip_aabb};
+use gizmo::{Axis, GizmoState, PickResult, GIZMO_WORLD_SCALE, gizmo_center_aabb, gizmo_shaft_aabb, gizmo_tip_aabb};
 use picking::{PickableBounds, ray_aabb_hit, world_aabb, screen_ray_from_ndc, viewport_ndc_from_rect};
 use viewport_renderer::{EditorViewportRenderer, EditorViewportTexture};
 use ui::{EditorCommands, EditorSceneInfo, EditorUiParams, build_editor_ui};
@@ -418,8 +418,6 @@ impl EditorApp {
             return;
         };
 
-        let viewport_height = viewport_texture.size[1] as f32;
-
         viewport_renderer.render_to_view(
             self.runtime.simulation(),
             &viewport_texture.view,
@@ -429,7 +427,6 @@ impl EditorApp {
             self.hovered_axis,
             self.hovered_center,
             self.gizmo_state,
-            viewport_height,
         );
     }
 
@@ -515,9 +512,7 @@ impl EditorApp {
 
         // Test gizmo center sphere first (highest priority — uniform scale handle).
         if let Some(origin) = gizmo_origin {
-            let dist = (camera_transform.translation - origin).length();
-            let scale = gizmo_screen_scale(dist, viewport_size.1, fov);
-            let (c_min, c_max) = gizmo_center_aabb(origin, scale);
+            let (c_min, c_max) = gizmo_center_aabb(origin, GIZMO_WORLD_SCALE);
             if let Some(t) = ray_aabb_hit(ray_origin, ray_dir, c_min, c_max) {
                 best_t = t;
                 best_result = Some(PickResult::GizmoCenter);
@@ -526,12 +521,10 @@ impl EditorApp {
 
         // Test gizmo axis shafts and tips (lower priority than center).
         if let Some(origin) = gizmo_origin {
-            let dist = (camera_transform.translation - origin).length();
-            let scale = gizmo_screen_scale(dist, viewport_size.1, fov);
             for axis in Axis::ALL {
                 // Shaft region — starts past the center sphere, generous perpendicular margin
                 let (shaft_min, shaft_max) =
-                    gizmo_shaft_aabb(origin, axis, scale);
+                    gizmo_shaft_aabb(origin, axis, GIZMO_WORLD_SCALE);
                 if let Some(t) = ray_aabb_hit(ray_origin, ray_dir, shaft_min, shaft_max)
                     && t < best_t
                 {
@@ -540,7 +533,7 @@ impl EditorApp {
                 }
                 // Tip region — cone arrowhead
                 let (tip_min, tip_max) =
-                    gizmo_tip_aabb(origin, axis, scale);
+                    gizmo_tip_aabb(origin, axis, GIZMO_WORLD_SCALE);
                 if let Some(t) = ray_aabb_hit(ray_origin, ray_dir, tip_min, tip_max)
                     && t < best_t
                 {

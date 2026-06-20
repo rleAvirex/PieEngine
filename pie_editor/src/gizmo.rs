@@ -106,21 +106,9 @@ pub struct GizmoVertex {
 /// Number of segments around the cone arrowhead.
 const CONE_SEGMENTS: usize = 12;
 
-/// Desired gizmo length in pixels on screen (roughly).
-const GIZMO_SCREEN_PIXELS: f32 = 90.0;
-
-/// Calculate a screen-fixed gizmo scale factor.
-///
-/// This converts a desired pixel size to a world-space size at the given
-/// camera distance, using the camera's actual vertical FOV. The result
-/// is that the gizmo always appears `GIZMO_SCREEN_PIXELS` pixels tall
-/// regardless of how far the camera is.
-pub fn gizmo_screen_scale(cam_distance: f32, viewport_height_pixels: f32, fov: f32) -> f32 {
-    let fov_half = fov * 0.5;
-    let world_height_at_d = 2.0 * cam_distance * fov_half.tan();
-    let pixels_per_world = viewport_height_pixels / world_height_at_d;
-    GIZMO_SCREEN_PIXELS / pixels_per_world
-}
+/// Desired gizmo length in world units. The gizmo is a constant size in
+/// world space and does not change with camera distance.
+pub const GIZMO_WORLD_SCALE: f32 = 0.5;
 
 /// Generate the full gizmo mesh for all three axes plus center sphere.
 ///
@@ -128,7 +116,7 @@ pub fn gizmo_screen_scale(cam_distance: f32, viewport_height_pixels: f32, fov: f
 ///
 /// - `hovered_axis`: Which axis the mouse is hovering over (brightens it).
 /// - `hovered_center`: Whether the center scale sphere is hovered.
-/// - `gizmo_scale`: World-space length of one axis (from `gizmo_screen_scale`).
+/// - `gizmo_scale`: World-space length of one axis (use `GIZMO_WORLD_SCALE`).
 pub fn build_gizmo_mesh(
     origin: Vec3,
     cam_pos: Vec3,
