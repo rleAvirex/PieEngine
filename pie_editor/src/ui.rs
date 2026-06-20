@@ -5,7 +5,7 @@ use egui::{
     load::SizedTexture, vec2, CornerRadius, Stroke, Margin, Frame,
 };
 use hecs::Entity;
-use pie_runtime::components::{DirectionalLight, Name, Transform};
+use pie_runtime::components::{Camera, DirectionalLight, Name, Transform};
 use pie_runtime::core::RuntimeApp;
 
 use crate::gizmo::{Axis, GizmoState};
@@ -218,8 +218,21 @@ pub fn build_editor_ui(params: EditorUiParams<'_>) {
                         ui.label(RichText::new("Y").color(TEXT_DIM).size(10.0).monospace()); ui.add(egui::DragValue::new(&mut transform.scale.y).speed(0.05));
                         ui.label(RichText::new("Z").color(TEXT_DIM).size(10.0).monospace()); ui.add(egui::DragValue::new(&mut transform.scale.z).speed(0.05));
                     });
-                } else {
-                    ui.label(RichText::new("Selected entity has no editable transform.").color(TEXT_DIM).size(11.0));
+                }
+                // Camera FOV section — shown when the selected entity has a Camera component
+                if let Ok(mut camera) = runtime.simulation_mut().world_mut().get::<&mut Camera>(entity) {
+                    ui.add_space(SPACING_SM);
+                    ui.label(RichText::new("📷  Camera").color(TEXT_PRIMARY).size(11.0).strong());
+                    ui.add_space(SPACING_XS);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("FOV").color(TEXT_SECONDARY).size(11.0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let mut deg = camera.fov.to_degrees();
+                            ui.add(egui::DragValue::new(&mut deg).speed(1.0).min_decimals(1).max_decimals(1).range(1.0..=179.0));
+                            ui.label(RichText::new("°").color(TEXT_DIM).size(10.0));
+                            camera.fov = deg.to_radians().max(0.01);
+                        });
+                    });
                 }
             } else {
                 ui.label(RichText::new("No entity selected.").color(TEXT_DIM).size(12.0));

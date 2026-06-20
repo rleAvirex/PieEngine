@@ -2,7 +2,7 @@ use glam::{Quat, Vec3};
 use hecs::Entity;
 
 use crate::assets::loader::gltf::ImportedScene;
-use crate::components::{ActiveCamera, MeshRenderer, Name, Transform};
+use crate::components::{ActiveCamera, Camera, MeshRenderer, Name, Transform};
 use crate::core::{BootstrapSceneResult, SimulationCore};
 
 fn look_at_camera_transform(eye: Vec3, target: Vec3) -> Transform {
@@ -51,6 +51,7 @@ pub fn spawn_imported_scene(core: &mut SimulationCore, imported: &ImportedScene)
         core.world_mut().spawn((
             Name::new(format!("{}Camera", node.name)),
             ActiveCamera,
+            Camera::default(),
             Transform {
                 translation: node.translation,
                 rotation: node.rotation,
@@ -61,6 +62,7 @@ pub fn spawn_imported_scene(core: &mut SimulationCore, imported: &ImportedScene)
         core.world_mut().spawn((
             Name::new("ImportedSceneCamera"),
             ActiveCamera,
+            Camera::default(),
             default_scene_camera(),
         ))
     };

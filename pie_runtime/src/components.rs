@@ -42,6 +42,31 @@ pub struct Velocity(pub Vec3);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ActiveCamera;
 
+/// Camera parameters that control how the scene is projected.
+///
+/// Attach this alongside `ActiveCamera` to configure the perspective
+/// projection. The `fov` field is the vertical field of view in radians.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Camera {
+    /// Vertical field of view in radians. Default is π/4 (45°).
+    pub fov: f32,
+}
+
+impl Default for Camera {
+    fn default() -> Self {
+        Self {
+            fov: std::f32::consts::FRAC_PI_4, // 45°
+        }
+    }
+}
+
+impl Camera {
+    /// Create a camera with the given vertical FOV in radians.
+    pub fn with_fov(fov: f32) -> Self {
+        Self { fov: fov.max(0.01) }
+    }
+}
+
 /// A single directional light used for the baseline lit renderer.
 ///
 /// The light is stored as a simulation resource instead of an entity so the
@@ -88,7 +113,7 @@ impl Name {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActiveCamera, DirectionalLight, Name, Transform, Velocity};
+    use super::{ActiveCamera, Camera, DirectionalLight, Name, Transform, Velocity};
     use glam::{Quat, Vec3};
 
     #[test]
@@ -126,6 +151,18 @@ mod tests {
     #[test]
     fn active_camera_is_a_zero_sized_marker() {
         let _marker = ActiveCamera;
+    }
+
+    #[test]
+    fn camera_default_fov_is_45_degrees() {
+        let cam = Camera::default();
+        assert!((cam.fov - std::f32::consts::FRAC_PI_4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn camera_with_fov_clamps_to_positive() {
+        let cam = Camera::with_fov(-1.0);
+        assert!(cam.fov > 0.0);
     }
 
     #[test]

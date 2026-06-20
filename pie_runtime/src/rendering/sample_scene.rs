@@ -1,7 +1,7 @@
 use glam::Vec3;
 
 use crate::assets::{AssetRegistry, MaterialAsset, MeshAsset, MeshVertex};
-use crate::components::{ActiveCamera, MeshRenderer, Name, Transform, Velocity};
+use crate::components::{ActiveCamera, Camera, MeshRenderer, Name, Transform, Velocity};
 use crate::core::{BootstrapSceneResult, SimulationCore};
 use crate::rendering::camera::look_at_camera_transform;
 
@@ -33,6 +33,7 @@ pub fn bootstrap_fallback_render_scene(
     let active_camera = core.world_mut().spawn((
         Name::new("FallbackCamera"),
         ActiveCamera,
+        Camera::default(),
         look_at_camera_transform(eye, Vec3::ZERO),
     ));
 

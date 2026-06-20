@@ -109,18 +109,15 @@ const CONE_SEGMENTS: usize = 12;
 /// Desired gizmo length in pixels on screen (roughly).
 const GIZMO_SCREEN_PIXELS: f32 = 90.0;
 
-/// Camera vertical half-FOV used by the runtime (`Mat4::perspective_rh(FRAC_PI_4, ...)`).
-/// This is `π/4 / 2 = π/8 ≈ 22.5°`.
-const CAM_FOV_HALF: f32 = std::f32::consts::FRAC_PI_4 * 0.5;
-
 /// Calculate a screen-fixed gizmo scale factor.
 ///
 /// This converts a desired pixel size to a world-space size at the given
-/// camera distance, using the runtime's actual vertical FOV (45°). The result
+/// camera distance, using the camera's actual vertical FOV. The result
 /// is that the gizmo always appears `GIZMO_SCREEN_PIXELS` pixels tall
 /// regardless of how far the camera is.
-pub fn gizmo_screen_scale(cam_distance: f32, viewport_height_pixels: f32) -> f32 {
-    let world_height_at_d = 2.0 * cam_distance * CAM_FOV_HALF.tan();
+pub fn gizmo_screen_scale(cam_distance: f32, viewport_height_pixels: f32, fov: f32) -> f32 {
+    let fov_half = fov * 0.5;
+    let world_height_at_d = 2.0 * cam_distance * fov_half.tan();
     let pixels_per_world = viewport_height_pixels / world_height_at_d;
     GIZMO_SCREEN_PIXELS / pixels_per_world
 }

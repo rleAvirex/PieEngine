@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use hecs::{Entity, World};
 
-use crate::components::{ActiveCamera, DirectionalLight, Name, Transform, Velocity};
+use crate::components::{ActiveCamera, Camera, DirectionalLight, Name, Transform, Velocity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineMode {
@@ -130,7 +130,7 @@ impl SimulationCore {
 
     pub fn bootstrap_scene(&mut self) -> Entity {
         self.world
-            .spawn((Name::new("MainCamera"), ActiveCamera, Transform::default()))
+            .spawn((Name::new("MainCamera"), ActiveCamera, Camera::default(), Transform::default()))
     }
 
     pub fn bootstrap_scene_with_summary(&mut self) -> BootstrapSceneResult {

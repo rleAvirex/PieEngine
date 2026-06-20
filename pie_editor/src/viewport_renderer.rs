@@ -9,7 +9,7 @@ use hecs::Entity;
 use pie_runtime::assets::{
     AssetRegistry, MaterialAsset, MaterialHandle, MeshAsset, MeshVertex, load_shader_named,
 };
-use pie_runtime::components::{DirectionalLight, Transform};
+use pie_runtime::components::{Camera, DirectionalLight, Transform};
 use pie_runtime::rendering::{CameraUniform, camera_view_proj};
 use wgpu::util::DeviceExt;
 
@@ -500,7 +500,8 @@ impl EditorViewportRenderer {
         let camera_uniform = CameraUniform::from_simulation(simulation, aspect);
         self.queue.as_ref().write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
 
-        let vp = camera_view_proj(simulation.active_camera().and_then(|e| simulation.world().get::<&Transform>(e).ok()).map(|t| *t).unwrap_or_default(), aspect);
+        let fov = simulation.active_camera().and_then(|e| simulation.world().get::<&Camera>(e).ok()).map(|c| c.fov).unwrap_or_else(|| Camera::default().fov);
+        let vp = camera_view_proj(simulation.active_camera().and_then(|e| simulation.world().get::<&Transform>(e).ok()).map(|t| *t).unwrap_or_default(), aspect, fov);
         self.queue.as_ref().write_buffer(&self.line_camera_buffer, 0, bytemuck::bytes_of(&LineCameraUniform { view_proj: vp.to_cols_array_2d() }));
 
         let dl = simulation.resource::<DirectionalLight>().copied().unwrap_or_default();
@@ -551,7 +552,7 @@ impl EditorViewportRenderer {
             if let Some(origin) = gizmo_origin {
                 let cam_pos = simulation.active_camera().and_then(|e| simulation.world().get::<&Transform>(e).ok()).map(|t| t.translation).unwrap_or(Vec3::new(0.0, 1.0, 5.0));
                 let dist = (cam_pos - origin).length();
-                let scale = gizmo_screen_scale(dist, viewport_height);
+                let scale = gizmo_screen_scale(dist, viewport_height, fov);
 
                 let gizmo_verts = build_gizmo_mesh(origin, cam_pos, scale, hovered_axis, hovered_center, gizmo_state);
                 if !gizmo_verts.is_empty() && gizmo_verts.len() <= self.gizmo_vertex_capacity {

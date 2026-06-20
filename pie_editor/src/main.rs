@@ -22,7 +22,7 @@ use hecs::Entity;
 use pie_runtime::assets::{
     AssetRegistry, load_gltf_scene, spawn_imported_scene,
 };
-use pie_runtime::components::Transform;
+use pie_runtime::components::{Camera, Transform};
 use pie_runtime::core::RuntimeApp;
 use pie_runtime::init_logging;
 use pie_runtime::rendering::camera_view_proj;
@@ -500,7 +500,14 @@ impl EditorApp {
                     .map(|transform| *transform)
             })
             .unwrap_or_default();
-        let view_proj = camera_view_proj(camera_transform, aspect);
+        let fov = self
+            .runtime
+            .simulation()
+            .active_camera()
+            .and_then(|e| self.runtime.simulation().world().get::<&Camera>(e).ok())
+            .map(|c| c.fov)
+            .unwrap_or_else(|| Camera::default().fov);
+        let view_proj = camera_view_proj(camera_transform, aspect, fov);
         let (ray_origin, ray_dir) = screen_ray_from_ndc(ndc, view_proj);
 
         let mut best_t = f32::INFINITY;
@@ -509,7 +516,7 @@ impl EditorApp {
         // Test gizmo center sphere first (highest priority — uniform scale handle).
         if let Some(origin) = gizmo_origin {
             let dist = (camera_transform.translation - origin).length();
-            let scale = gizmo_screen_scale(dist, viewport_size.1);
+            let scale = gizmo_screen_scale(dist, viewport_size.1, fov);
             let (c_min, c_max) = gizmo_center_aabb(origin, scale);
             if let Some(t) = ray_aabb_hit(ray_origin, ray_dir, c_min, c_max) {
                 best_t = t;
@@ -520,7 +527,7 @@ impl EditorApp {
         // Test gizmo axis shafts and tips (lower priority than center).
         if let Some(origin) = gizmo_origin {
             let dist = (camera_transform.translation - origin).length();
-            let scale = gizmo_screen_scale(dist, viewport_size.1);
+            let scale = gizmo_screen_scale(dist, viewport_size.1, fov);
             for axis in Axis::ALL {
                 // Shaft region — starts past the center sphere, generous perpendicular margin
                 let (shaft_min, shaft_max) =
@@ -796,7 +803,14 @@ impl ApplicationHandler for EditorApp {
                         let viewport_h = commands.viewport_rect
                             .map(|r| r.height())
                             .unwrap_or(900.0);
-                        let fov_half = std::f32::consts::FRAC_PI_4 * 0.5; // 45° total FOV (matches runtime)
+                        let fov = self
+                            .runtime
+                            .simulation()
+                            .active_camera()
+                            .and_then(|e| self.runtime.simulation().world().get::<&Camera>(e).ok())
+                            .map(|c| c.fov)
+                            .unwrap_or_else(|| Camera::default().fov);
+                        let fov_half = fov * 0.5;
                         let world_height_at_d = 2.0 * dist * fov_half.tan();
                         let world_per_pixel = world_height_at_d / viewport_h;
 

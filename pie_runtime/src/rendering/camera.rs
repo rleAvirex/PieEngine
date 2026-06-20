@@ -1,6 +1,6 @@
 use glam::{Mat4, Quat, Vec3};
 
-use crate::components::Transform;
+use crate::components::{Camera, Transform};
 use crate::core::SimulationCore;
 
 const OPENGL_TO_WGPU_MATRIX: Mat4 = Mat4::from_cols_array(&[
@@ -22,8 +22,14 @@ impl CameraUniform {
             .map(|transform| *transform)
             .unwrap_or_default();
 
+        let fov = core
+            .active_camera()
+            .and_then(|entity| core.world().get::<&Camera>(entity).ok())
+            .map(|cam| cam.fov)
+            .unwrap_or_else(|| Camera::default().fov);
+
         Self {
-            view_proj: camera_view_proj(transform, aspect_ratio).to_cols_array_2d(),
+            view_proj: camera_view_proj(transform, aspect_ratio, fov).to_cols_array_2d(),
             position: [
                 transform.translation.x,
                 transform.translation.y,
@@ -34,7 +40,7 @@ impl CameraUniform {
     }
 }
 
-pub fn camera_view_proj(transform: Transform, aspect_ratio: f32) -> Mat4 {
+pub fn camera_view_proj(transform: Transform, aspect_ratio: f32, fov: f32) -> Mat4 {
     let world = Mat4::from_scale_rotation_translation(
         transform.scale,
         transform.rotation,
@@ -43,7 +49,7 @@ pub fn camera_view_proj(transform: Transform, aspect_ratio: f32) -> Mat4 {
     let view = world.inverse();
     let projection = OPENGL_TO_WGPU_MATRIX
         * Mat4::perspective_rh(
-            std::f32::consts::FRAC_PI_4,
+            fov.max(0.01),
             aspect_ratio.max(0.01),
             0.1,
             100.0,
