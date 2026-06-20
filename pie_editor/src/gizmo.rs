@@ -358,16 +358,17 @@ pub fn gizmo_center_aabb(origin: Vec3, gizmo_scale: f32) -> (Vec3, Vec3) {
 // ---------------------------------------------------------------------------
 
 /// Scale factor to bring FBX gizmo models down to the editor gizmo size.
-/// The FBX models are authored at ~1 unit per axis; the procedural gizmo
-/// uses GIZMO_WORLD_SCALE (0.5). Dividing by 20 makes the FBX gizmo match.
-const FBX_GIZMO_SCALE_DIVISOR: f32 = 20.0;
+/// The FBX GizmosMoveTool arrow extends ~29 units along its primary axis.
+/// With GIZMO_WORLD_SCALE = 0.5, a divisor of 29 gives an arrow length
+/// of ~0.5, matching the procedural gizmo.
+const FBX_GIZMO_SCALE_DIVISOR: f32 = 29.0;
 
 /// Convert an FBX-loaded mesh (MeshVertex format) into GizmoVertex triangles
 /// with axis-based coloring.
 ///
 /// Blender exports FBX with Z-up convention, but our engine uses Y-up.
-/// This function applies a -90° rotation around X to convert:
-///   Blender (x, y, z) → Engine (x, -z, y)
+/// This function applies the coordinate swap to convert:
+///   Blender (x, y, z) → Engine (x, z, y)
 ///
 /// Each vertex is then colored based on which axis it aligns with most:
 /// - Primarily along +X or -X → red (X axis)
@@ -411,8 +412,8 @@ pub fn build_fbx_gizmo_mesh(
             let v = &vertices[idx];
             let local = Vec3::from(v.position);
 
-            // Rotate from Blender Z-up to engine Y-up: (x, y, z) → (x, -z, y)
-            let rotated = Vec3::new(local.x, -local.z, local.y);
+            // Rotate from Blender Z-up to engine Y-up: (x, y, z) → (x, z, y)
+            let rotated = Vec3::new(local.x, local.z, local.y);
 
             // Scale and translate to world position
             let pos = rotated * scale + origin;
