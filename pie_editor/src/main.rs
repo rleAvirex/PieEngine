@@ -33,7 +33,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window as WinitWindow, WindowId};
 
 use fly_camera::{EditorCamera, SPEED_SCROLL_FACTOR};
-use gizmo::{Axis, GizmoState, PickResult, gizmo_screen_scale, gizmo_shaft_aabb, gizmo_tip_aabb};
+use gizmo::{Axis, GizmoState, PickResult, gizmo_center_aabb, gizmo_screen_scale, gizmo_shaft_aabb, gizmo_tip_aabb};
 use picking::{PickableBounds, ray_aabb_hit, world_aabb, screen_ray_from_ndc, viewport_ndc_from_rect};
 use viewport_renderer::{EditorViewportRenderer, EditorViewportTexture};
 use ui::{EditorCommands, EditorSceneInfo, EditorUiParams, build_editor_ui};
@@ -189,6 +189,7 @@ struct EditorApp {
     viewport_hovered: bool,
     gizmo_state: GizmoState,
     hovered_axis: Option<Axis>,
+    hovered_center: bool,
 }
 
 impl EditorApp {
@@ -233,6 +234,7 @@ impl EditorApp {
             viewport_hovered: false,
             gizmo_state: GizmoState::default(),
             hovered_axis: None,
+            hovered_center: false,
         }
     }
 
@@ -425,6 +427,7 @@ impl EditorApp {
             selection_aabb,
             gizmo_origin,
             self.hovered_axis,
+            self.hovered_center,
             self.gizmo_state,
             viewport_height,
         );
@@ -503,12 +506,23 @@ impl EditorApp {
         let mut best_t = f32::INFINITY;
         let mut best_result = None;
 
-        // Test gizmo axes first (they take priority).
+        // Test gizmo center sphere first (highest priority — uniform scale handle).
+        if let Some(origin) = gizmo_origin {
+            let dist = (camera_transform.translation - origin).length();
+            let scale = gizmo_screen_scale(dist, viewport_size.1);
+            let (c_min, c_max) = gizmo_center_aabb(origin, scale);
+            if let Some(t) = ray_aabb_hit(ray_origin, ray_dir, c_min, c_max) {
+                best_t = t;
+                best_result = Some(PickResult::GizmoCenter);
+            }
+        }
+
+        // Test gizmo axis shafts and tips (lower priority than center).
         if let Some(origin) = gizmo_origin {
             let dist = (camera_transform.translation - origin).length();
             let scale = gizmo_screen_scale(dist, viewport_size.1);
             for axis in Axis::ALL {
-                // Shaft region — starts past the center cube, generous perpendicular margin
+                // Shaft region — starts past the center sphere, generous perpendicular margin
                 let (shaft_min, shaft_max) =
                     gizmo_shaft_aabb(origin, axis, scale);
                 if let Some(t) = ray_aabb_hit(ray_origin, ray_dir, shaft_min, shaft_max)
@@ -752,7 +766,7 @@ impl ApplicationHandler for EditorApp {
 
                 self.apply_camera_to_runtime();
 
-                // ---- Gizmo drag update ----
+                // ---- Gizmo drag update: axis translation ----
                 if let GizmoState::Dragging { axis, entity_start_pos, total_world_delta } = self.gizmo_state {
                     if let Some((dx, dy)) = commands.gizmo_drag_delta {
                         let cam_transform = self
@@ -772,6 +786,7 @@ impl ApplicationHandler for EditorApp {
                         let cam_right = cam_transform.rotation * Vec3::X;
                         let cam_up = cam_transform.rotation * Vec3::Y;
 
+                        // Project the axis direction onto the camera's screen-space axes.
                         let axis_screen_x = cam_right.dot(axis_dir);
                         let axis_screen_y = cam_up.dot(axis_dir);
 
@@ -785,8 +800,11 @@ impl ApplicationHandler for EditorApp {
                         let world_height_at_d = 2.0 * dist * fov_half.tan();
                         let world_per_pixel = world_height_at_d / viewport_h;
 
+                        // NOTE: screen Y (dy) is positive downward, but cam_up points
+                        // upward in world space. Negate dy so dragging up moves along
+                        // the axis if it points upward on screen.
                         let frame_delta =
-                            (dx * axis_screen_x + dy * axis_screen_y) * world_per_pixel;
+                            (dx * axis_screen_x + (-dy) * axis_screen_y) * world_per_pixel;
 
                         let new_total = total_world_delta + frame_delta;
 
@@ -814,11 +832,44 @@ impl ApplicationHandler for EditorApp {
                     }
                 }
 
+                // ---- Gizmo drag update: uniform scaling ----
+                if let GizmoState::UniformScaling { entity_start_scale, total_scale_delta } = self.gizmo_state {
+                    if let Some((_, dy)) = commands.gizmo_drag_delta {
+                        // Drag up (negative dy in screen) → scale up.
+                        let scale_speed = 0.004;
+                        let frame_delta = -dy * scale_speed;
+                        let new_total = total_scale_delta + frame_delta;
+                        let factor = (1.0 + new_total).max(0.01);
+                        let new_scale = entity_start_scale * factor;
+
+                        if let Some(entity) = self.selected_entity {
+                            if let Ok(mut transform) = self
+                                .runtime
+                                .simulation_mut()
+                                .world_mut()
+                                .get::<&mut Transform>(entity)
+                            {
+                                transform.scale = new_scale;
+                            }
+                            self.gizmo_state = GizmoState::UniformScaling {
+                                entity_start_scale,
+                                total_scale_delta: new_total,
+                            };
+                            self.apply_camera_to_runtime();
+                            needs_redraw = true;
+                        }
+                    }
+                    if commands.gizmo_drag_end {
+                        self.gizmo_state = GizmoState::Idle;
+                    }
+                }
+
                 // ---- Gizmo hover detection (every frame) ----
                 self.hovered_axis = None;
+                self.hovered_center = false;
                 if let (Some(rect), Some(hover_pos)) =
                     (commands.viewport_rect, commands.viewport_hover_pos)
-                    && !matches!(self.gizmo_state, GizmoState::Dragging { .. })
+                    && !self.gizmo_state.is_active()
                     && let Some(ndc) = viewport_ndc_from_rect(rect, hover_pos)
                 {
                         let gizmo_origin = self.selected_entity.and_then(|entity| {
@@ -829,20 +880,27 @@ impl ApplicationHandler for EditorApp {
                                 .ok()
                                 .map(|t| t.translation)
                         });
-                        if let Some(PickResult::GizmoAxis(axis)) =
-                            self.pick_viewport(ndc, (rect.width(), rect.height()), gizmo_origin)
-                        {
-                            self.hovered_axis = Some(axis);
+                        match self.pick_viewport(ndc, (rect.width(), rect.height()), gizmo_origin) {
+                            Some(PickResult::GizmoAxis(axis)) => {
+                                self.hovered_axis = Some(axis);
+                            }
+                            Some(PickResult::GizmoCenter) => {
+                                self.hovered_center = true;
+                            }
+                            Some(PickResult::Entity(_)) | None => {}
                         }
                 }
-                // While dragging, keep the dragged axis highlighted.
+                // While dragging, keep the dragged element highlighted.
                 if let Some(axis) = self.gizmo_state.dragged_axis() {
                     self.hovered_axis = Some(axis);
+                }
+                if matches!(self.gizmo_state, GizmoState::UniformScaling { .. }) {
+                    self.hovered_center = true;
                 }
 
                 // ---- Viewport picking: gizmo drag start (on primary drag-start) ----
                 if commands.viewport_primary_drag_started
-                    && !matches!(self.gizmo_state, GizmoState::Dragging { .. })
+                    && !self.gizmo_state.is_active()
                     && let Some(rect) = commands.viewport_rect
                     && let Some(drag_start_pos) = commands.viewport_primary_drag_start_pos
                     && let Some(ndc) = viewport_ndc_from_rect(rect, drag_start_pos)
@@ -855,30 +913,46 @@ impl ApplicationHandler for EditorApp {
                                 .ok()
                                 .map(|t| t.translation)
                         });
-                        if let Some(PickResult::GizmoAxis(axis)) =
-                            self.pick_viewport(ndc, (rect.width(), rect.height()), gizmo_origin)
-                        {
-                            if let Some(entity) = self.selected_entity
-                                && let Ok(transform) = self
-                                    .runtime
-                                    .simulation()
-                                    .world()
-                                    .get::<&Transform>(entity)
-                            {
-                                    self.gizmo_state = GizmoState::Dragging {
-                                        axis,
-                                        entity_start_pos: transform.translation,
-                                        total_world_delta: 0.0,
-                                    };
-                                    needs_redraw = true;
+                        match self.pick_viewport(ndc, (rect.width(), rect.height()), gizmo_origin) {
+                            Some(PickResult::GizmoAxis(axis)) => {
+                                if let Some(entity) = self.selected_entity
+                                    && let Ok(transform) = self
+                                        .runtime
+                                        .simulation()
+                                        .world()
+                                        .get::<&Transform>(entity)
+                                {
+                                        self.gizmo_state = GizmoState::Dragging {
+                                            axis,
+                                            entity_start_pos: transform.translation,
+                                            total_world_delta: 0.0,
+                                        };
+                                        needs_redraw = true;
+                                }
                             }
+                            Some(PickResult::GizmoCenter) => {
+                                if let Some(entity) = self.selected_entity
+                                    && let Ok(transform) = self
+                                        .runtime
+                                        .simulation()
+                                        .world()
+                                        .get::<&Transform>(entity)
+                                {
+                                        self.gizmo_state = GizmoState::UniformScaling {
+                                            entity_start_scale: transform.scale,
+                                            total_scale_delta: 0.0,
+                                        };
+                                        needs_redraw = true;
+                                }
+                            }
+                            Some(PickResult::Entity(_)) | None => {}
                         }
                 }
 
                 // ---- Viewport picking: entity selection (on click-release) ----
                 if let (Some(rect), Some(click_pos)) =
                     (commands.viewport_rect, commands.viewport_click_pos)
-                    && !matches!(self.gizmo_state, GizmoState::Dragging { .. })
+                    && !self.gizmo_state.is_active()
                     && let Some(ndc) = viewport_ndc_from_rect(rect, click_pos)
                 {
                         let gizmo_origin = self.selected_entity.and_then(|entity| {
@@ -894,7 +968,7 @@ impl ApplicationHandler for EditorApp {
                                 self.selected_entity = Some(entity);
                                 needs_redraw = true;
                             }
-                            Some(PickResult::GizmoAxis(_)) => {
+                            Some(PickResult::GizmoAxis(_)) | Some(PickResult::GizmoCenter) => {
                                 // Handled above via drag-start.
                             }
                             None => {}

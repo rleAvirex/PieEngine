@@ -3,8 +3,8 @@
 //! Generates UE5/Unity-style gizmo geometry:
 //! - **Axis shafts**: Thick box (6 faces) for each axis, visible from all angles.
 //! - **Arrow cones**: Solid cone mesh at each axis tip, 12 segments around.
-//! - **Origin sphere**: Small icosphere at the center where all axes meet.
-//! - **Hover highlighting**: Hovered or dragged axes are brightened to white.
+//! - **Center sphere**: White icosphere for uniform scaling at the origin.
+//! - **Hover highlighting**: Hovered or dragged axes are brightened.
 //!
 //! All geometry uses per-vertex color (no separate color uniform needed).
 //! The gizmo uses screen-fixed sizing: it always occupies a consistent number
@@ -58,12 +58,18 @@ pub enum GizmoState {
     /// Not interacting with the gizmo.
     #[default]
     Idle,
-    /// Actively dragging an axis.
+    /// Actively dragging an axis to translate.
     Dragging {
         axis: Axis,
         entity_start_pos: Vec3,
         /// Accumulated world-space offset along the drag axis.
         total_world_delta: f32,
+    },
+    /// Dragging the center sphere to scale uniformly.
+    UniformScaling {
+        entity_start_scale: Vec3,
+        /// Accumulated scale factor delta (0 = no change, positive = bigger).
+        total_scale_delta: f32,
     },
 }
 
@@ -72,8 +78,13 @@ impl GizmoState {
     pub fn dragged_axis(self) -> Option<Axis> {
         match self {
             Self::Dragging { axis, .. } => Some(axis),
-            Self::Idle => None,
+            Self::Idle | Self::UniformScaling { .. } => None,
         }
+    }
+
+    /// Returns true if the gizmo is actively being interacted with.
+    pub fn is_active(self) -> bool {
+        !matches!(self, Self::Idle)
     }
 }
 
@@ -81,6 +92,7 @@ impl GizmoState {
 pub enum PickResult {
     Entity(hecs::Entity),
     GizmoAxis(Axis),
+    GizmoCenter,
 }
 
 /// A vertex for the gizmo triangle mesh: position + per-vertex color.
@@ -113,18 +125,19 @@ pub fn gizmo_screen_scale(cam_distance: f32, viewport_height_pixels: f32) -> f32
     GIZMO_SCREEN_PIXELS / pixels_per_world
 }
 
-/// Generate the full gizmo mesh for all three axes.
+/// Generate the full gizmo mesh for all three axes plus center sphere.
 ///
 /// Returns a flat list of `GizmoVertex` forming triangles.
 ///
 /// - `hovered_axis`: Which axis the mouse is hovering over (brightens it).
-///   Also considers the `GizmoState::Dragging` axis as "active".
+/// - `hovered_center`: Whether the center scale sphere is hovered.
 /// - `gizmo_scale`: World-space length of one axis (from `gizmo_screen_scale`).
 pub fn build_gizmo_mesh(
     origin: Vec3,
     cam_pos: Vec3,
     gizmo_scale: f32,
     hovered_axis: Option<Axis>,
+    hovered_center: bool,
     gizmo_state: GizmoState,
 ) -> Vec<GizmoVertex> {
     let mut verts = Vec::new();
@@ -143,10 +156,16 @@ pub fn build_gizmo_mesh(
     let shaft_half_width = gizmo_scale * 0.028;   // thick shaft
     let cone_length = gizmo_scale * 0.25;          // prominent arrowhead
     let cone_radius = gizmo_scale * 0.09;          // wide cone
-    let origin_radius = gizmo_scale * 0.04;        // small sphere at center
+    let center_radius = gizmo_scale * 0.055;       // center scale sphere
 
-    // -- Origin sphere --
-    push_icosphere(&mut verts, origin, right, up_corrected, to_cam, origin_radius, [0.75, 0.75, 0.75, 1.0]);
+    // -- Center scale sphere (white, highlights when hovered/active) --
+    let is_center_active = hovered_center || matches!(gizmo_state, GizmoState::UniformScaling { .. });
+    let center_color = if is_center_active {
+        [1.0, 1.0, 1.0, 1.0]       // bright white when hovered/active
+    } else {
+        [0.85, 0.85, 0.85, 1.0]    // light gray normally
+    };
+    push_icosphere(&mut verts, origin, right, up_corrected, to_cam, center_radius, center_color);
 
     // -- Per-axis: thick box shaft + cone arrowhead --
     let active_axis = gizmo_state.dragged_axis();
@@ -257,7 +276,7 @@ fn push_cone(
     }
 }
 
-/// Push a low-poly icosphere (20 faces) for the origin marker.
+/// Push a low-poly icosphere (20 faces) using an icosahedron.
 fn push_icosphere(
     verts: &mut Vec<GizmoVertex>,
     center: Vec3,
@@ -267,59 +286,35 @@ fn push_icosphere(
     radius: f32,
     color: [f32; 4],
 ) {
-    // Golden ratio for icosahedron
-    let t = 0.5 * (1.0 + (5.0_f32).sqrt());
-    let s = radius / (1.0 + t * t).sqrt();
+    let phi = 0.5 * (1.0 + (5.0_f32).sqrt()); // golden ratio
+    let s = radius / (1.0 + phi * phi).sqrt();
 
-    // 12 vertices of an icosahedron in local space, then transformed
-    let _local_verts: Vec<Vec3> = vec![
-        center + (-1.0 * right + t * up) * s,
-        center + (1.0 * right + t * up) * s,
-        center + (-1.0 * right - t * up) * s,
-        center + (1.0 * right - t * up) * s,
-        center + (-t * right + 1.0 * forward) * s + up * s * 0.0,
-        center + (t * right + 1.0 * forward) * s,
-        center + (-t * right - 1.0 * forward) * s,
-        center + (t * right - 1.0 * forward) * s,
-        center + (-1.0 * forward + t * up) * s,
-        center + (1.0 * forward + t * up) * s,
-        center + (-1.0 * forward - t * up) * s,
-        center + (1.0 * forward - t * up) * s,
+    // 12 vertices of an icosahedron, mapped to world space via the camera basis.
+    let v: [Vec3; 12] = [
+        center + (-1.0 * right + phi * up) * s,
+        center + (1.0 * right + phi * up) * s,
+        center + (-1.0 * right - phi * up) * s,
+        center + (1.0 * right - phi * up) * s,
+        center + (-phi * right + 1.0 * forward) * s,
+        center + (phi * right + 1.0 * forward) * s,
+        center + (-phi * right - 1.0 * forward) * s,
+        center + (phi * right - 1.0 * forward) * s,
+        center + (-1.0 * forward + phi * up) * s,
+        center + (1.0 * forward + phi * up) * s,
+        center + (-1.0 * forward - phi * up) * s,
+        center + (1.0 * forward - phi * up) * s,
     ];
 
-    // Simplified: just use a cube for the origin (cheaper and still looks good)
-    push_cube(verts, center, right, up, forward, radius, color);
-}
-
-/// Push a small cube.
-fn push_cube(
-    verts: &mut Vec<GizmoVertex>,
-    center: Vec3,
-    right: Vec3,
-    up: Vec3,
-    forward: Vec3,
-    half_size: f32,
-    color: [f32; 4],
-) {
-    let corners = [
-        center - right * half_size - up * half_size - forward * half_size,
-        center + right * half_size - up * half_size - forward * half_size,
-        center + right * half_size + up * half_size - forward * half_size,
-        center - right * half_size + up * half_size - forward * half_size,
-        center - right * half_size - up * half_size + forward * half_size,
-        center + right * half_size - up * half_size + forward * half_size,
-        center + right * half_size + up * half_size + forward * half_size,
-        center - right * half_size + up * half_size + forward * half_size,
+    // 20 triangular faces of the icosahedron.
+    let faces: [(usize, usize, usize); 20] = [
+        (0, 11, 5),  (0, 5, 1),   (0, 1, 7),   (0, 7, 10),  (0, 10, 11),
+        (1, 5, 9),   (5, 11, 4),  (11, 10, 2),  (10, 7, 6),  (7, 1, 8),
+        (3, 9, 4),   (3, 4, 2),   (3, 2, 6),    (3, 6, 8),   (3, 8, 9),
+        (4, 9, 5),   (2, 4, 11),  (6, 2, 10),   (8, 6, 7),   (9, 8, 1),
     ];
 
-    let faces: [(usize, usize, usize, usize); 6] = [
-        (0, 1, 2, 3), (5, 4, 7, 6), (4, 0, 3, 7),
-        (1, 5, 6, 2), (3, 2, 6, 7), (4, 5, 1, 0),
-    ];
-
-    for (a, b, c, d) in &faces {
-        push_tri(verts, corners[*a], corners[*b], corners[*c], color);
-        push_tri(verts, corners[*a], corners[*c], corners[*d], color);
+    for (a, b, c) in &faces {
+        push_tri(verts, v[*a], v[*b], v[*c], color);
     }
 }
 
@@ -330,19 +325,19 @@ fn push_tri(verts: &mut Vec<GizmoVertex>, a: Vec3, b: Vec3, c: Vec3, color: [f32
 }
 
 // ---------------------------------------------------------------------------
-// Pick AABB helpers — separate shaft and tip regions with dead zone at center
+// Pick AABB helpers — shaft, tip, and center regions
 // ---------------------------------------------------------------------------
 
 /// Build a world-space AABB around the gizmo axis **shaft** for ray-picking.
 ///
-/// The shaft starts just past the center cube (dead zone) and ends where
+/// The shaft starts just past the center sphere (dead zone) and ends where
 /// the cone begins. The perpendicular margin is generous so thin shafts
 /// are easy to click.
 pub fn gizmo_shaft_aabb(origin: Vec3, axis: Axis, gizmo_scale: f32) -> (Vec3, Vec3) {
     let dir = axis.direction();
-    // Skip the center cube area — this is the "dead zone" so clicking the
-    // center diamond doesn't accidentally grab an axis.
-    let shaft_start_offset = gizmo_scale * 0.06;
+    // Skip the center sphere area — dead zone so clicking the center
+    // sphere doesn't accidentally grab an axis.
+    let shaft_start_offset = gizmo_scale * 0.08;
     let shaft_end_offset = gizmo_scale * 0.75; // cone starts at ~0.75
     let start = origin + dir * shaft_start_offset;
     let end = origin + dir * shaft_end_offset;
@@ -359,4 +354,10 @@ pub fn gizmo_tip_aabb(origin: Vec3, axis: Axis, gizmo_scale: f32) -> (Vec3, Vec3
     let tip = origin + axis.direction() * gizmo_scale;
     let ext = Vec3::splat(gizmo_scale * 0.15);
     (tip - ext, tip + ext)
+}
+
+/// Build a world-space AABB around the center scale sphere for ray-picking.
+pub fn gizmo_center_aabb(origin: Vec3, gizmo_scale: f32) -> (Vec3, Vec3) {
+    let ext = Vec3::splat(gizmo_scale * 0.10);
+    (origin - ext, origin + ext)
 }

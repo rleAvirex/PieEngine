@@ -486,6 +486,7 @@ impl EditorViewportRenderer {
         selection_aabb: Option<(Vec3, Vec3)>,
         gizmo_origin: Option<Vec3>,
         hovered_axis: Option<Axis>,
+        hovered_center: bool,
         gizmo_state: GizmoState,
         viewport_height: f32,
     ) {
@@ -552,7 +553,7 @@ impl EditorViewportRenderer {
                 let dist = (cam_pos - origin).length();
                 let scale = gizmo_screen_scale(dist, viewport_height);
 
-                let gizmo_verts = build_gizmo_mesh(origin, cam_pos, scale, hovered_axis, gizmo_state);
+                let gizmo_verts = build_gizmo_mesh(origin, cam_pos, scale, hovered_axis, hovered_center, gizmo_state);
                 if !gizmo_verts.is_empty() && gizmo_verts.len() <= self.gizmo_vertex_capacity {
                     let bytes: &[u8] = bytemuck::cast_slice(&gizmo_verts);
                     self.queue.as_ref().write_buffer(&self.gizmo_vertex_buffer, 0, bytes);
