@@ -13,7 +13,7 @@ use pie_runtime::components::{DirectionalLight, Transform};
 use pie_runtime::rendering::{CameraUniform, camera_view_proj};
 use wgpu::util::DeviceExt;
 
-use crate::gizmo::{Axis, build_gizmo_vertices};
+use crate::gizmo::{GizmoVertex, build_gizmo_mesh};
 use crate::theme;
 
 // ---------------------------------------------------------------------------
@@ -145,6 +145,9 @@ pub struct EditorViewportRenderer {
     line_color_buffer: wgpu::Buffer,
     line_color_bind_group: wgpu::BindGroup,
     line_vertex_buffer: wgpu::Buffer,
+    gizmo_pipeline: wgpu::RenderPipeline,
+    gizmo_camera_buffer: wgpu::Buffer,
+    gizmo_camera_bind_group: wgpu::BindGroup,
     gizmo_vertex_buffer: wgpu::Buffer,
     gizmo_vertex_capacity: usize,
 }
@@ -354,9 +357,66 @@ impl EditorViewportRenderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
         });
 
-        const GIZMO_MAX_VERTICES: usize = 64;
+        // -- Gizmo triangle pipeline (unlit, per-vertex color) --
+        let gizmo_shader_source = load_shader_named(assets_root, "gizmo_mesh").map_err(|e| e.to_string())?;
+        let gizmo_shader = device.as_ref().create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("editor viewport gizmo shader"),
+            source: wgpu::ShaderSource::Wgsl(gizmo_shader_source.into()),
+        });
+
+        let gizmo_camera_bgl = device.as_ref().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("editor viewport gizmo camera bind group layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0, visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            }],
+        });
+
+        let gizmo_pipeline_layout = device.as_ref().create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("editor viewport gizmo pipeline layout"),
+            bind_group_layouts: &[&gizmo_camera_bgl],
+            push_constant_ranges: &[],
+        });
+
+        let gizmo_pipeline = device.as_ref().create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("editor viewport gizmo pipeline"),
+            layout: Some(&gizmo_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &gizmo_shader, entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GizmoVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress, shader_location: 1 },
+                    ],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &gizmo_shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState { format: target_format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, strip_index_format: None, front_face: wgpu::FrontFace::Ccw, cull_mode: None, unclipped_depth: false, polygon_mode: wgpu::PolygonMode::Fill, conservative: false },
+            depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH_FORMAT, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::Less, stencil: wgpu::StencilState::default(), bias: wgpu::DepthBiasState::default() }),
+            multisample: wgpu::MultisampleState::default(), multiview: None, cache: None,
+        });
+
+        let gizmo_camera_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("editor viewport gizmo camera buffer"), size: 64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+        });
+        let gizmo_camera_bind_group = device.as_ref().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("editor viewport gizmo camera bind group"), layout: &gizmo_camera_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: gizmo_camera_buffer.as_entire_binding() }],
+        });
+
+        // Gizmo vertex buffer — allocate 8192 vertices (generous for 3 axes × cone + shaft + cube).
+        const GIZMO_MAX_VERTICES: usize = 8192;
         let gizmo_vertex_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("editor viewport gizmo vertex buffer"), size: (std::mem::size_of::<[f32; 3]>() * GIZMO_MAX_VERTICES) as u64,
+            label: Some("editor viewport gizmo vertex buffer"), size: (std::mem::size_of::<GizmoVertex>() * GIZMO_MAX_VERTICES) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
         });
 
@@ -366,7 +426,8 @@ impl EditorViewportRenderer {
             fallback_texture, fallback_texture_view, materials: std::collections::HashMap::new(),
             drawables: Vec::new(), depth_texture, depth_texture_view, depth_size: [1, 1],
             line_pipeline, line_camera_buffer, line_camera_bind_group, line_color_buffer, line_color_bind_group,
-            line_vertex_buffer, gizmo_vertex_buffer, gizmo_vertex_capacity: GIZMO_MAX_VERTICES,
+            line_vertex_buffer,
+            gizmo_pipeline, gizmo_camera_buffer, gizmo_camera_bind_group, gizmo_vertex_buffer, gizmo_vertex_capacity: GIZMO_MAX_VERTICES,
         })
     }
 
@@ -480,21 +541,25 @@ impl EditorViewportRenderer {
                 let cam_pos = simulation.active_camera().and_then(|e| simulation.world().get::<&Transform>(e).ok()).map(|t| t.translation).unwrap_or(Vec3::new(0.0, 1.0, 5.0));
                 let dist = (cam_pos - origin).length();
                 let scale = (dist * 0.15).clamp(0.4, 4.0);
-                let tip = scale * 0.18;
-                let (gv, counts) = build_gizmo_vertices(origin, cam_pos, scale, tip);
-                if !gv.is_empty() && gv.len() <= self.gizmo_vertex_capacity {
-                    self.queue.as_ref().write_buffer(&self.gizmo_vertex_buffer, 0, bytemuck::cast_slice(&gv));
-                    rp.set_pipeline(&self.line_pipeline);
-                    rp.set_bind_group(0, &self.line_camera_bind_group, &[]);
-                    rp.set_bind_group(1, &self.line_color_bind_group, &[]);
+
+                // UE5/Unity-style gizmo proportions
+                let shaft_half_width = scale * 0.012;
+                let cone_length = scale * 0.2;
+                let cone_radius = scale * 0.06;
+                let cube_half = scale * 0.025;
+
+                let gizmo_verts = build_gizmo_mesh(origin, cam_pos, scale, shaft_half_width, cone_length, cone_radius, cube_half);
+                if !gizmo_verts.is_empty() && gizmo_verts.len() <= self.gizmo_vertex_capacity {
+                    let bytes: &[u8] = bytemuck::cast_slice(&gizmo_verts);
+                    self.queue.as_ref().write_buffer(&self.gizmo_vertex_buffer, 0, bytes);
+
+                    // Upload view-proj for gizmo camera uniform
+                    self.queue.as_ref().write_buffer(&self.gizmo_camera_buffer, 0, bytemuck::bytes_of(&LineCameraUniform { view_proj: vp.to_cols_array_2d() }));
+
+                    rp.set_pipeline(&self.gizmo_pipeline);
+                    rp.set_bind_group(0, &self.gizmo_camera_bind_group, &[]);
                     rp.set_vertex_buffer(0, self.gizmo_vertex_buffer.slice(..));
-                    let mut offset = 0u32;
-                    for (i, axis) in Axis::ALL.iter().enumerate() {
-                        self.queue.as_ref().write_buffer(&self.line_color_buffer, 0, bytemuck::bytes_of(&LineColorUniform { color: axis.color() }));
-                        let n = counts[i] as u32;
-                        rp.draw(offset..offset + n, 0..1);
-                        offset += n;
-                    }
+                    rp.draw(0..gizmo_verts.len() as u32, 0..1);
                 }
             }
         }
