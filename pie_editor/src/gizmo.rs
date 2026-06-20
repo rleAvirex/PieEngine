@@ -339,7 +339,7 @@ fn push_tri(verts: &mut Vec<GizmoVertex>, a: Vec3, b: Vec3, c: Vec3, color: [f32
 pub fn gizmo_axis_aabb(origin: Vec3, axis: Axis, length: f32, visual_radius: f32) -> (Vec3, Vec3) {
     let dir = axis.direction();
     let end = origin + dir * length;
-    let margin = visual_radius * 3.0; // 3× visual size for comfortable picking
+    let margin = visual_radius * 5.0; // 5× visual size for comfortable picking
     let half = Vec3::splat(margin);
     let min = origin.min(end) - half;
     let max = origin.max(end) + half;
@@ -349,6 +349,6 @@ pub fn gizmo_axis_aabb(origin: Vec3, axis: Axis, length: f32, visual_radius: f32
 /// Build a world-space AABB around the gizmo cone tip for easier picking.
 pub fn gizmo_tip_aabb(origin: Vec3, axis: Axis, length: f32, visual_radius: f32) -> (Vec3, Vec3) {
     let tip = origin + axis.direction() * length;
-    let ext = Vec3::splat(visual_radius * 4.0);
+    let ext = Vec3::splat(visual_radius * 6.0);
     (tip - ext, tip + ext)
 }

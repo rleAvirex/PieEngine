@@ -776,10 +776,18 @@ impl ApplicationHandler for EditorApp {
                         let axis_screen_x = cam_right.dot(axis_dir);
                         let axis_screen_y = cam_up.dot(axis_dir);
 
+                        // Compute world units per pixel at the object's distance.
+                        // This makes the object move 1:1 with the mouse cursor.
                         let dist = (cam_transform.translation - entity_start_pos).length();
-                        let sensitivity = dist * 0.003;
+                        let viewport_h = commands.viewport_rect
+                            .map(|r| r.height())
+                            .unwrap_or(900.0);
+                        let fov_half = std::f32::consts::FRAC_PI_6; // 60° total FOV
+                        let world_height_at_d = 2.0 * dist * fov_half.tan();
+                        let world_per_pixel = world_height_at_d / viewport_h;
+
                         let frame_delta =
-                            (dx * axis_screen_x + dy * axis_screen_y) * sensitivity;
+                            (dx * axis_screen_x + dy * axis_screen_y) * world_per_pixel;
 
                         let new_total = total_world_delta + frame_delta;
 

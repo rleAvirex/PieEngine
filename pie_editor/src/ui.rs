@@ -243,7 +243,13 @@ pub fn build_editor_ui(params: EditorUiParams<'_>) {
                         let response = ui.add(Image::from_texture(SizedTexture::new(texture_id, vec2(viewport_size[0] as f32, viewport_size[1] as f32))).sense(Sense::click_and_drag()));
                         commands.viewport_hovered = response.hovered() || response.dragged();
                         commands.viewport_rect = Some(response.rect);
-                        commands.viewport_hover_pos = response.hover_pos();
+                        // Use ctx pointer position for hover detection — response.hover_pos()
+                        // returns None during drag, but we still need the position for gizmo
+                        // hover tracking. Fall back to latest pointer position in the rect.
+                        let pointer_pos = response.hover_pos()
+                            .or_else(|| ui.ctx().input(|i| i.pointer.latest_pos()))
+                            .filter(|&pos| response.rect.contains(pos));
+                        commands.viewport_hover_pos = pointer_pos;
                         if response.dragged_by(egui::PointerButton::Secondary) { let d = response.drag_delta(); commands.viewport_look_delta = Some((d.x, d.y)); }
                         if response.drag_started_by(egui::PointerButton::Primary) { commands.viewport_primary_drag_started = true; commands.viewport_primary_drag_start_pos = response.interact_pointer_pos(); }
                         if response.dragged_by(egui::PointerButton::Primary) { let d = response.drag_delta(); if matches!(gizmo_state, GizmoState::Dragging { .. }) { commands.gizmo_drag_delta = Some((d.x, d.y)); } }
