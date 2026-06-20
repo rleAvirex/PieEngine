@@ -338,8 +338,6 @@ impl LoadingScreen {
 
 #[cfg(test)]
 mod tests {
-    use super::LoadingScreen;
-
     #[test]
     fn loading_uniform_size_is_16_byte_aligned() {
         // The uniform struct must be valid for bytemuck casting

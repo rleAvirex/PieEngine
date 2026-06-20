@@ -136,8 +136,8 @@ enum FbxProperty {
     FloatArray(Vec<f32>),
     DoubleArray(Vec<f64>),
     IntArray(Vec<i32>),
-    Int64Array(Vec<i64>),
-    String(Vec<u8>),
+    Int64Array,
+    String,
     Other,
 }
 
@@ -204,9 +204,9 @@ fn parse_records(
                     properties.push(FbxProperty::IntArray(arr));
                 }
                 'l' => {
-                    let (arr, new_off) = parse_array_i64(data, prop_offset, rec_end, path)?;
+                    let (_, new_off) = parse_array_i64(data, prop_offset, rec_end, path)?;
                     prop_offset = new_off;
-                    properties.push(FbxProperty::Int64Array(arr));
+                    properties.push(FbxProperty::Int64Array);
                 }
                 'b' => {
                     let new_off = skip_array(data, prop_offset, 1, path)?;
@@ -222,7 +222,8 @@ fn parse_records(
                     if prop_offset + slen > rec_end {
                         break;
                     }
-                    properties.push(FbxProperty::String(data[prop_offset..prop_offset + slen].to_vec()));
+                    properties.push(FbxProperty::String);
+                    let _ = &data[prop_offset..prop_offset + slen];
                     prop_offset += slen;
                 }
                 'R' => {

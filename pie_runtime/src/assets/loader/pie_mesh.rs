@@ -78,6 +78,7 @@ struct PieMeshMetadata {
     name: String,
     vertex_count: usize,
     index_count: usize,
+    #[allow(dead_code)]
     vertex_stride: usize,
 }
 
