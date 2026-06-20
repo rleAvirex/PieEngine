@@ -826,9 +826,44 @@ impl ApplicationHandler for EditorApp {
                     self.hovered_axis = Some(axis);
                 }
 
-                // ---- Viewport picking (entity or gizmo) ----
+                // ---- Viewport picking: gizmo drag start (on primary drag-start) ----
+                if commands.viewport_primary_drag_started
+                    && !matches!(self.gizmo_state, GizmoState::Dragging { .. })
+                    && let Some(rect) = commands.viewport_rect
+                    && let Some(drag_start_pos) = commands.viewport_primary_drag_start_pos
+                    && let Some(ndc) = viewport_ndc_from_rect(rect, drag_start_pos)
+                {
+                        let gizmo_origin = self.selected_entity.and_then(|entity| {
+                            self.runtime
+                                .simulation()
+                                .world()
+                                .get::<&Transform>(entity)
+                                .ok()
+                                .map(|t| t.translation)
+                        });
+                        if let Some(PickResult::GizmoAxis(axis)) =
+                            self.pick_viewport(ndc, (rect.width(), rect.height()), gizmo_origin)
+                        {
+                            if let Some(entity) = self.selected_entity
+                                && let Ok(transform) = self
+                                    .runtime
+                                    .simulation()
+                                    .world()
+                                    .get::<&Transform>(entity)
+                            {
+                                    self.gizmo_state = GizmoState::Dragging {
+                                        axis,
+                                        entity_start_pos: transform.translation,
+                                    };
+                                    needs_redraw = true;
+                            }
+                        }
+                }
+
+                // ---- Viewport picking: entity selection (on click-release) ----
                 if let (Some(rect), Some(click_pos)) =
                     (commands.viewport_rect, commands.viewport_click_pos)
+                    && !matches!(self.gizmo_state, GizmoState::Dragging { .. })
                     && let Some(ndc) = viewport_ndc_from_rect(rect, click_pos)
                 {
                         let gizmo_origin = self.selected_entity.and_then(|entity| {
@@ -844,20 +879,8 @@ impl ApplicationHandler for EditorApp {
                                 self.selected_entity = Some(entity);
                                 needs_redraw = true;
                             }
-                            Some(PickResult::GizmoAxis(axis)) => {
-                                if let Some(entity) = self.selected_entity
-                                    && let Ok(transform) = self
-                                        .runtime
-                                        .simulation()
-                                        .world()
-                                        .get::<&Transform>(entity)
-                                {
-                                        self.gizmo_state = GizmoState::Dragging {
-                                            axis,
-                                            entity_start_pos: transform.translation,
-                                        };
-                                        needs_redraw = true;
-                                }
+                            Some(PickResult::GizmoAxis(_)) => {
+                                // Handled above via drag-start.
                             }
                             None => {}
                         }

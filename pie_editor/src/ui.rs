@@ -21,6 +21,8 @@ pub struct EditorCommands {
     pub viewport_rect: Option<egui::Rect>,
     pub viewport_click_pos: Option<egui::Pos2>,
     pub viewport_hover_pos: Option<egui::Pos2>,
+    pub viewport_primary_drag_started: bool,
+    pub viewport_primary_drag_start_pos: Option<egui::Pos2>,
     pub gizmo_drag_delta: Option<(f32, f32)>,
     pub gizmo_drag_end: bool,
 }
@@ -243,6 +245,7 @@ pub fn build_editor_ui(params: EditorUiParams<'_>) {
                         commands.viewport_rect = Some(response.rect);
                         commands.viewport_hover_pos = response.hover_pos();
                         if response.dragged_by(egui::PointerButton::Secondary) { let d = response.drag_delta(); commands.viewport_look_delta = Some((d.x, d.y)); }
+                        if response.drag_started_by(egui::PointerButton::Primary) { commands.viewport_primary_drag_started = true; commands.viewport_primary_drag_start_pos = response.interact_pointer_pos(); }
                         if response.dragged_by(egui::PointerButton::Primary) { let d = response.drag_delta(); if matches!(gizmo_state, GizmoState::Dragging { .. }) { commands.gizmo_drag_delta = Some((d.x, d.y)); } }
                         if response.drag_stopped_by(egui::PointerButton::Primary) && matches!(gizmo_state, GizmoState::Dragging { .. }) { commands.gizmo_drag_end = true; }
                         if response.clicked() { commands.viewport_click_pos = response.interact_pointer_pos(); }
