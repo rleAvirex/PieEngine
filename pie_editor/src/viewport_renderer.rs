@@ -41,6 +41,25 @@ fn create_editor_depth_texture(
     (texture, view)
 }
 
+fn create_hdr_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("editor HDR render target"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
 // ---------------------------------------------------------------------------
 // Viewport texture
 // ---------------------------------------------------------------------------
@@ -137,6 +156,12 @@ pub struct EditorViewportRenderer {
     fallback_texture_view: wgpu::TextureView,
     materials: std::collections::HashMap<MaterialHandle, EditorGpuMaterial>,
     drawables: Vec<EditorGpuDrawable>,
+    /// HDR intermediate render target (Rgba16Float) for the scene pass.
+    /// The PBR shader outputs linear HDR values here. A resolve pass then
+    /// copies to the sRGB swapchain, applying hardware gamma.
+    hdr_texture: wgpu::Texture,
+    hdr_texture_view: wgpu::TextureView,
+    hdr_size: [u32; 2],
     depth_texture: wgpu::Texture,
     depth_texture_view: wgpu::TextureView,
     depth_size: [u32; 2],
@@ -146,6 +171,11 @@ pub struct EditorViewportRenderer {
     line_color_buffer: wgpu::Buffer,
     line_color_bind_group: wgpu::BindGroup,
     selection_vertex_buffer: wgpu::Buffer,
+    /// Resolve pipeline: fullscreen blit from HDR texture to sRGB swapchain.
+    resolve_pipeline: wgpu::RenderPipeline,
+    resolve_bind_group: wgpu::BindGroup,
+    /// Sampler for the HDR resolve pass.
+    resolve_sampler: wgpu::Sampler,
     gizmo_pipeline: wgpu::RenderPipeline,
     gizmo_camera_buffer: wgpu::Buffer,
     gizmo_camera_bind_group: wgpu::BindGroup,
@@ -162,6 +192,7 @@ impl EditorViewportRenderer {
         let device = Arc::new(render_state.device.clone());
         let queue = Arc::new(render_state.queue.clone());
         let target_format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let hdr_format = wgpu::TextureFormat::Rgba16Float;
 
         let shader_source =
             load_shader_named(assets_root, "textured_mesh").map_err(|e| e.to_string())?;
@@ -236,7 +267,7 @@ impl EditorViewportRenderer {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader, entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState { format: target_format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })],
+                targets: &[Some(wgpu::ColorTargetState { format: hdr_format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, strip_index_format: None, front_face: wgpu::FrontFace::Ccw, cull_mode: Some(wgpu::Face::Back), unclipped_depth: false, polygon_mode: wgpu::PolygonMode::Fill, conservative: false },
@@ -425,13 +456,86 @@ impl EditorViewportRenderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
         });
 
+        let (hdr_texture, hdr_texture_view) = create_hdr_texture(device.as_ref(), 1, 1);
+
+        // -- HDR Resolve pipeline (fullscreen blit HDR → sRGB swapchain) --
+        let resolve_shader_source = load_shader_named(assets_root, "resolve_hdr").map_err(|e| e.to_string())?;
+        let resolve_shader = device.as_ref().create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("editor HDR resolve shader"),
+            source: wgpu::ShaderSource::Wgsl(resolve_shader_source.into()),
+        });
+
+        let resolve_sampler = device.as_ref().create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("HDR resolve sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let resolve_bgl = device.as_ref().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("HDR resolve bind group layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+            ],
+        });
+
+        let resolve_bind_group = device.as_ref().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("HDR resolve bind group"),
+            layout: &resolve_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&hdr_texture_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&resolve_sampler) },
+            ],
+        });
+
+        let resolve_pipeline_layout = device.as_ref().create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("HDR resolve pipeline layout"),
+            bind_group_layouts: &[&resolve_bgl],
+            push_constant_ranges: &[],
+        });
+
+        let resolve_pipeline = device.as_ref().create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("HDR resolve pipeline"),
+            layout: Some(&resolve_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &resolve_shader, entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &resolve_shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState { format: target_format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, strip_index_format: None, front_face: wgpu::FrontFace::Ccw, cull_mode: None, unclipped_depth: false, polygon_mode: wgpu::PolygonMode::Fill, conservative: false },
+            depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH_FORMAT, depth_write_enabled: false, depth_compare: wgpu::CompareFunction::Always, stencil: wgpu::StencilState::default(), bias: wgpu::DepthBiasState::default() }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None, cache: None,
+        });
+
         Ok(Self {
             device, queue, pipeline, camera_buffer, camera_bind_group, model_buffer, model_bind_group,
             light_buffer, light_bind_group, material_bind_group_layout: texture_bgl, sampler,
             fallback_texture, fallback_texture_view, materials: std::collections::HashMap::new(),
-            drawables: Vec::new(), depth_texture, depth_texture_view, depth_size: [1, 1],
+            drawables: Vec::new(),
+            hdr_texture, hdr_texture_view, hdr_size: [1, 1],
+            depth_texture, depth_texture_view, depth_size: [1, 1],
             line_pipeline, line_camera_buffer, line_camera_bind_group, line_color_buffer, line_color_bind_group,
             selection_vertex_buffer,
+            resolve_pipeline, resolve_bind_group, resolve_sampler,
             gizmo_pipeline, gizmo_camera_buffer, gizmo_camera_bind_group, gizmo_vertex_buffer, gizmo_vertex_capacity: GIZMO_MAX_VERTICES,
             fbx_gizmo_move: None, fbx_gizmo_sphere: None,
         })
@@ -555,6 +659,21 @@ impl EditorViewportRenderer {
         gizmo_state: GizmoState,
     ) {
         if size[0] == 0 || size[1] == 0 { return; }
+
+        // Resize HDR and depth textures if viewport size changed
+        if self.hdr_size != size {
+            let (ht, htv) = create_hdr_texture(self.device.as_ref(), size[0], size[1]);
+            self.hdr_texture = ht; self.hdr_texture_view = htv; self.hdr_size = size;
+            // Recreate resolve bind group with new HDR texture view
+            self.resolve_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("HDR resolve bind group (resized)"),
+                layout: &self.resolve_pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.hdr_texture_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.resolve_sampler) },
+                ],
+            });
+        }
         if self.depth_size != size {
             let (dt, dtv) = create_editor_depth_texture(self.device.as_ref(), size[0], size[1]);
             self.depth_texture = dt; self.depth_texture_view = dtv; self.depth_size = size;
@@ -580,11 +699,25 @@ impl EditorViewportRenderer {
         }
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("editor viewport encoder") });
+
+        // ====================================================================
+        // Pass 1: Scene → HDR render target (Rgba16Float, linear space)
+        // ====================================================================
+        // PBR shader outputs linear HDR values. No gamma correction in shader
+        // — that's handled by the sRGB swapchain in pass 2.
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("editor viewport render pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(theme::VIEWPORT_CLEAR), store: wgpu::StoreOp::Store } })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.depth_texture_view, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
+                label: Some("editor scene HDR pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.hdr_texture_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(theme::VIEWPORT_CLEAR), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
                 timestamp_writes: None, occlusion_query_set: None,
             });
 
@@ -603,7 +736,38 @@ impl EditorViewportRenderer {
                 rp.set_index_buffer(d.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..d.mesh.index_count, 0, 0..1);
             }
+        }
 
+        // ====================================================================
+        // Pass 2: Resolve HDR → sRGB swapchain + overlays (gizmos, selection)
+        // ====================================================================
+        // Copy HDR texture to swapchain (hardware converts linear → sRGB),
+        // then render gizmo and selection overlays directly on the swapchain.
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("editor resolve + overlay pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None, occlusion_query_set: None,
+            });
+
+            // Resolve: blit HDR scene to sRGB swapchain
+            rp.set_pipeline(&self.resolve_pipeline);
+            rp.set_bind_group(0, &self.resolve_bind_group, &[]);
+            rp.draw(0..3, 0..1);
+
+            // Selection highlight overlay
             if selection_aabb.is_some() {
                 self.queue.as_ref().write_buffer(&self.line_color_buffer, 0, bytemuck::bytes_of(&LineColorUniform { color: [1.0, 0.5, 0.0, 1.0] }));
                 rp.set_pipeline(&self.line_pipeline);
@@ -613,11 +777,11 @@ impl EditorViewportRenderer {
                 rp.draw(0..SELECTION_VERTEX_COUNT as u32, 0..1);
             }
 
+            // Gizmo overlay
             if let Some(origin) = gizmo_origin {
                 let cam_pos = simulation.active_camera().and_then(|e| simulation.world().get::<&Transform>(e).ok()).map(|t| t.translation).unwrap_or(Vec3::new(0.0, 1.0, 5.0));
                 let scale = GIZMO_WORLD_SCALE;
 
-                // Use FBX gizmo mesh if loaded, otherwise fall back to procedural
                 let gizmo_verts = if let Some((ref verts, ref indices)) = self.fbx_gizmo_move {
                     let (sp_verts, sp_indices) = match self.fbx_gizmo_sphere {
                         Some((ref sv, ref si)) => (Some(sv.as_slice()), Some(si.as_slice())),
@@ -630,10 +794,7 @@ impl EditorViewportRenderer {
                 if !gizmo_verts.is_empty() && gizmo_verts.len() <= self.gizmo_vertex_capacity {
                     let bytes: &[u8] = bytemuck::cast_slice(&gizmo_verts);
                     self.queue.as_ref().write_buffer(&self.gizmo_vertex_buffer, 0, bytes);
-
-                    // Upload view-proj for gizmo camera uniform
                     self.queue.as_ref().write_buffer(&self.gizmo_camera_buffer, 0, bytemuck::bytes_of(&LineCameraUniform { view_proj: vp.to_cols_array_2d() }));
-
                     rp.set_pipeline(&self.gizmo_pipeline);
                     rp.set_bind_group(0, &self.gizmo_camera_bind_group, &[]);
                     rp.set_vertex_buffer(0, self.gizmo_vertex_buffer.slice(..));
@@ -641,6 +802,7 @@ impl EditorViewportRenderer {
                 }
             }
         }
+
         self.queue.as_ref().submit(std::iter::once(encoder.finish()));
     }
 }

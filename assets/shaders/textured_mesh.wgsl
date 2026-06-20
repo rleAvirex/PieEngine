@@ -54,6 +54,9 @@ struct VertexOutput {
     @location(3) tangent: vec4<f32>,
 };
 
+/// ACES Filmic tone mapping (Stephen Hill's fit).
+/// Matches UE5's default tone mapper — cinematic HDR → LDR with
+/// soft rolloff on highlights, preserving detail in bright areas.
 fn tone_map(color: vec3<f32>) -> vec3<f32> {
     let a = 2.51;
     let b = 0.03;
@@ -61,6 +64,17 @@ fn tone_map(color: vec3<f32>) -> vec3<f32> {
     let d = 0.59;
     let e = 0.14;
     return clamp((color * (a * color + b)) / (color * (c * color + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+/// ACES RRT/ODT fit by Krzysztof Narkowicz.
+/// More accurate filmic curve with better highlight rolloff.
+fn aces_tone_map(x: vec3<f32>) -> vec3<f32> {
+    let a = vec3<f32>(0.0245786);
+    let b = vec3<f32>(-0.000090537);
+    let c = vec3<f32>(0.1533003);
+    let d = vec3<f32>(0.00134049);
+    let e = vec3<f32>(0.30);
+    return (x * (x * a + b)) / (x * (x * c + d + e));
 }
 
 fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
@@ -150,8 +164,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let ambient = base_color.rgb * 0.03;
     let lighting = ambient + (diffuse + specular) * light_radiance * n_dot_l;
 
-    let mapped = tone_map(lighting);
-    let gamma_corrected = pow(mapped, vec3<f32>(1.0 / 2.2));
+    // ACES tone map HDR → LDR, then output in linear space.
+    // The sRGB swapchain (Rgba8UnormSrgb) applies gamma correction
+    // automatically in hardware — no manual pow(1/2.2) needed.
+    let mapped = aces_tone_map(lighting);
 
-    return vec4<f32>(gamma_corrected, base_color.a);
+    return vec4<f32>(mapped, base_color.a);
 }
