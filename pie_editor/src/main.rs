@@ -448,14 +448,7 @@ impl EditorApp {
 
     fn render_viewport(&mut self) {
         let selection_aabb = self.selection_world_aabb();
-        let gizmo_origin = self.selected_entity.and_then(|entity| {
-            self.runtime
-                .simulation()
-                .world()
-                .get::<&Transform>(entity)
-                .ok()
-                .map(|t| t.translation)
-        });
+        let gizmo_origin = self.gizmo_origin();
         let Some(viewport_renderer) = self.viewport_renderer.as_mut() else {
             return;
         };
@@ -620,6 +613,23 @@ impl EditorApp {
             pickable.local_max,
             &world_transform,
         ))
+    }
+
+    /// Returns the gizmo origin for the selected entity, or `None` if the
+    /// selected entity is the active camera (the editor camera is controlled
+    /// via fly-camera input, not gizmo transforms).
+    fn gizmo_origin(&self) -> Option<Vec3> {
+        let camera_entity = self.runtime.simulation().active_camera();
+        self.selected_entity
+            .filter(|&e| Some(e) != camera_entity)
+            .and_then(|entity| {
+                self.runtime
+                    .simulation()
+                    .world()
+                    .get::<&Transform>(entity)
+                    .ok()
+                    .map(|t| t.translation)
+            })
     }
 
     fn apply_camera_to_runtime(&mut self) {
@@ -916,14 +926,7 @@ impl ApplicationHandler for EditorApp {
                     && !self.gizmo_state.is_active()
                     && let Some(ndc) = viewport_ndc_from_rect(rect, hover_pos)
                 {
-                        let gizmo_origin = self.selected_entity.and_then(|entity| {
-                            self.runtime
-                                .simulation()
-                                .world()
-                                .get::<&Transform>(entity)
-                                .ok()
-                                .map(|t| t.translation)
-                        });
+                        let gizmo_origin = self.gizmo_origin();
                         match self.pick_viewport(ndc, (rect.width(), rect.height()), gizmo_origin) {
                             Some(PickResult::GizmoAxis(axis)) => {
                                 self.hovered_axis = Some(axis);
@@ -949,14 +952,7 @@ impl ApplicationHandler for EditorApp {
                     && let Some(drag_start_pos) = commands.viewport_primary_drag_start_pos
                     && let Some(ndc) = viewport_ndc_from_rect(rect, drag_start_pos)
                 {
-                        let gizmo_origin = self.selected_entity.and_then(|entity| {
-                            self.runtime
-                                .simulation()
-                                .world()
-                                .get::<&Transform>(entity)
-                                .ok()
-                                .map(|t| t.translation)
-                        });
+                        let gizmo_origin = self.gizmo_origin();
                         match self.pick_viewport(ndc, (rect.width(), rect.height()), gizmo_origin) {
                             Some(PickResult::GizmoAxis(axis)) => {
                                 if let Some(entity) = self.selected_entity
@@ -999,14 +995,7 @@ impl ApplicationHandler for EditorApp {
                     && !self.gizmo_state.is_active()
                     && let Some(ndc) = viewport_ndc_from_rect(rect, click_pos)
                 {
-                        let gizmo_origin = self.selected_entity.and_then(|entity| {
-                            self.runtime
-                                .simulation()
-                                .world()
-                                .get::<&Transform>(entity)
-                                .ok()
-                                .map(|t| t.translation)
-                        });
+                        let gizmo_origin = self.gizmo_origin();
                         match self.pick_viewport(ndc, (rect.width(), rect.height()), gizmo_origin) {
                             Some(PickResult::Entity(entity)) => {
                                 self.selected_entity = Some(entity);

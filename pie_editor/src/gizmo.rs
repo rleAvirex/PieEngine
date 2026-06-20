@@ -340,9 +340,9 @@ pub fn gizmo_shaft_aabb(origin: Vec3, axis: Axis, gizmo_scale: f32) -> (Vec3, Ve
 }
 
 /// Build a world-space AABB around the gizmo cone tip for easier picking.
-/// The cone extends past the shaft by `arrow_extension` (0.35 * gizmo_scale).
+/// The cone extends past the shaft by `arrow_extension` (0.15 * gizmo_scale).
 pub fn gizmo_tip_aabb(origin: Vec3, axis: Axis, gizmo_scale: f32) -> (Vec3, Vec3) {
-    let arrow_extension = gizmo_scale * 0.35;
+    let arrow_extension = gizmo_scale * 0.15;
     let tip = origin + axis.direction() * (gizmo_scale + arrow_extension);
     let ext = Vec3::splat(gizmo_scale * 0.18);
     (tip - ext, tip + ext)
@@ -399,12 +399,12 @@ pub fn build_fbx_gizmo_mesh(
     // Final scale: procedural gizmo scale divided by the FBX divisor
     let scale = gizmo_scale / FBX_GIZMO_SCALE_DIVISOR;
 
-    // Proportions for the procedural arrowheads. The cone extends beyond
-    // the FBX shaft so it's clearly visible at the tip.
+    // Proportions for the procedural arrowheads. The cone extends slightly
+    // beyond the FBX shaft so it's clearly visible at the tip.
     let cone_length = gizmo_scale * 0.25;
     let cone_radius = gizmo_scale * 0.10;
     // How far past the shaft the cone extends (the shaft ends at ~gizmo_scale)
-    let arrow_extension = gizmo_scale * 0.35;
+    let arrow_extension = gizmo_scale * 0.15;
 
     let axis_count = 3u32;
     let verts_per_arrow = indices.len();
