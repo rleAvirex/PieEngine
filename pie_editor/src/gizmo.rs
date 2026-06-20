@@ -109,18 +109,18 @@ const CONE_SEGMENTS: usize = 12;
 /// Desired gizmo length in pixels on screen (roughly).
 const GIZMO_SCREEN_PIXELS: f32 = 90.0;
 
+/// Camera vertical half-FOV used by the runtime (`Mat4::perspective_rh(FRAC_PI_4, ...)`).
+/// This is `π/4 / 2 = π/8 ≈ 22.5°`.
+const CAM_FOV_HALF: f32 = std::f32::consts::FRAC_PI_4 * 0.5;
+
 /// Calculate a screen-fixed gizmo scale factor.
 ///
 /// This converts a desired pixel size to a world-space size at the given
-/// camera distance, using the vertical FOV approximation. The result is
-/// that the gizmo always appears roughly `GIZMO_SCREEN_PIXELS` pixels tall
+/// camera distance, using the runtime's actual vertical FOV (45°). The result
+/// is that the gizmo always appears `GIZMO_SCREEN_PIXELS` pixels tall
 /// regardless of how far the camera is.
 pub fn gizmo_screen_scale(cam_distance: f32, viewport_height_pixels: f32) -> f32 {
-    // Approximate: the visible world height at distance d with perspective is
-    // roughly `2 * d * tan(fov_half)`. We don't have FOV directly, so we
-    // estimate from the runtime's typical 60° vertical FOV.
-    let fov_half = std::f32::consts::FRAC_PI_6; // ~30° → 60° total
-    let world_height_at_d = 2.0 * cam_distance * fov_half.tan();
+    let world_height_at_d = 2.0 * cam_distance * CAM_FOV_HALF.tan();
     let pixels_per_world = viewport_height_pixels / world_height_at_d;
     GIZMO_SCREEN_PIXELS / pixels_per_world
 }
@@ -156,7 +156,7 @@ pub fn build_gizmo_mesh(
     let shaft_half_width = gizmo_scale * 0.028;   // thick shaft
     let cone_length = gizmo_scale * 0.25;          // prominent arrowhead
     let cone_radius = gizmo_scale * 0.09;          // wide cone
-    let center_radius = gizmo_scale * 0.055;       // center scale sphere
+    let center_radius = gizmo_scale * 0.085;        // center scale sphere (larger, easy to grab)
 
     // -- Center scale sphere (white, highlights when hovered/active) --
     let is_center_active = hovered_center || matches!(gizmo_state, GizmoState::UniformScaling { .. });
@@ -358,6 +358,6 @@ pub fn gizmo_tip_aabb(origin: Vec3, axis: Axis, gizmo_scale: f32) -> (Vec3, Vec3
 
 /// Build a world-space AABB around the center scale sphere for ray-picking.
 pub fn gizmo_center_aabb(origin: Vec3, gizmo_scale: f32) -> (Vec3, Vec3) {
-    let ext = Vec3::splat(gizmo_scale * 0.10);
+    let ext = Vec3::splat(gizmo_scale * 0.13);
     (origin - ext, origin + ext)
 }

@@ -796,7 +796,7 @@ impl ApplicationHandler for EditorApp {
                         let viewport_h = commands.viewport_rect
                             .map(|r| r.height())
                             .unwrap_or(900.0);
-                        let fov_half = std::f32::consts::FRAC_PI_6; // 60° total FOV
+                        let fov_half = std::f32::consts::FRAC_PI_4 * 0.5; // 45° total FOV (matches runtime)
                         let world_height_at_d = 2.0 * dist * fov_half.tan();
                         let world_per_pixel = world_height_at_d / viewport_h;
 
