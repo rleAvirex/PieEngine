@@ -24,7 +24,7 @@ impl Axis {
     /// RGBA base color for this axis (not hovered).
     pub fn color(self) -> [f32; 4] {
         match self {
-            Self::X => [0.85, 0.22, 0.22, 1.0],   // red
+            Self::X => [0.255, 0.0, 0.0, 1.0],   // red
             Self::Y => [0.22, 0.85, 0.30, 1.0],   // green
             Self::Z => [0.25, 0.45, 0.95, 1.0],   // blue
         }
