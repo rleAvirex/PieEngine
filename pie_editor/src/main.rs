@@ -552,43 +552,35 @@ impl EditorApp {
         let view_proj = camera_view_proj(camera_transform, aspect, fov);
         let (ray_origin, ray_dir) = screen_ray_from_ndc(ndc, view_proj);
 
+        // ---- Phase 1: Test gizmo hit regions ----
+        // Gizmo picks ALWAYS take priority over scene entities so the gizmo
+        // remains usable even when it overlaps with a model.
+        if let Some(origin) = gizmo_origin {
+            // Center sphere (highest priority)
+            let (c_min, c_max) = gizmo_center_aabb(origin, GIZMO_WORLD_SCALE);
+            if ray_aabb_hit(ray_origin, ray_dir, c_min, c_max).is_some() {
+                return Some(PickResult::GizmoCenter);
+            }
+
+            // Axis shafts and tips
+            for axis in Axis::ALL {
+                let (shaft_min, shaft_max) =
+                    gizmo_shaft_aabb(origin, axis, GIZMO_WORLD_SCALE);
+                if ray_aabb_hit(ray_origin, ray_dir, shaft_min, shaft_max).is_some() {
+                    return Some(PickResult::GizmoAxis(axis));
+                }
+                let (tip_min, tip_max) =
+                    gizmo_tip_aabb(origin, axis, GIZMO_WORLD_SCALE);
+                if ray_aabb_hit(ray_origin, ray_dir, tip_min, tip_max).is_some() {
+                    return Some(PickResult::GizmoAxis(axis));
+                }
+            }
+        }
+
+        // ---- Phase 2: Test scene entities (only if no gizmo hit) ----
         let mut best_t = f32::INFINITY;
         let mut best_result = None;
 
-        // Test gizmo center sphere first (highest priority — uniform scale handle).
-        if let Some(origin) = gizmo_origin {
-            let (c_min, c_max) = gizmo_center_aabb(origin, GIZMO_WORLD_SCALE);
-            if let Some(t) = ray_aabb_hit(ray_origin, ray_dir, c_min, c_max) {
-                best_t = t;
-                best_result = Some(PickResult::GizmoCenter);
-            }
-        }
-
-        // Test gizmo axis shafts and tips (lower priority than center).
-        if let Some(origin) = gizmo_origin {
-            for axis in Axis::ALL {
-                // Shaft region — starts past the center sphere, generous perpendicular margin
-                let (shaft_min, shaft_max) =
-                    gizmo_shaft_aabb(origin, axis, GIZMO_WORLD_SCALE);
-                if let Some(t) = ray_aabb_hit(ray_origin, ray_dir, shaft_min, shaft_max)
-                    && t < best_t
-                {
-                        best_t = t;
-                        best_result = Some(PickResult::GizmoAxis(axis));
-                }
-                // Tip region — cone arrowhead
-                let (tip_min, tip_max) =
-                    gizmo_tip_aabb(origin, axis, GIZMO_WORLD_SCALE);
-                if let Some(t) = ray_aabb_hit(ray_origin, ray_dir, tip_min, tip_max)
-                    && t < best_t
-                {
-                        best_t = t;
-                        best_result = Some(PickResult::GizmoAxis(axis));
-                }
-            }
-        }
-
-        // Test scene entities.
         for pickable in &self.pickables {
             let world_transform = self
                 .runtime

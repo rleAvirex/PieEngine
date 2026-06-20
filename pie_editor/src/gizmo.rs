@@ -340,9 +340,11 @@ pub fn gizmo_shaft_aabb(origin: Vec3, axis: Axis, gizmo_scale: f32) -> (Vec3, Ve
 }
 
 /// Build a world-space AABB around the gizmo cone tip for easier picking.
+/// The cone extends past the shaft by `arrow_extension` (0.35 * gizmo_scale).
 pub fn gizmo_tip_aabb(origin: Vec3, axis: Axis, gizmo_scale: f32) -> (Vec3, Vec3) {
-    let tip = origin + axis.direction() * gizmo_scale;
-    let ext = Vec3::splat(gizmo_scale * 0.15);
+    let arrow_extension = gizmo_scale * 0.35;
+    let tip = origin + axis.direction() * (gizmo_scale + arrow_extension);
+    let ext = Vec3::splat(gizmo_scale * 0.18);
     (tip - ext, tip + ext)
 }
 
@@ -397,9 +399,12 @@ pub fn build_fbx_gizmo_mesh(
     // Final scale: procedural gizmo scale divided by the FBX divisor
     let scale = gizmo_scale / FBX_GIZMO_SCALE_DIVISOR;
 
-    // Proportions for the procedural arrowheads (matching build_gizmo_mesh)
+    // Proportions for the procedural arrowheads. The cone extends beyond
+    // the FBX shaft so it's clearly visible at the tip.
     let cone_length = gizmo_scale * 0.25;
-    let cone_radius = gizmo_scale * 0.09;
+    let cone_radius = gizmo_scale * 0.10;
+    // How far past the shaft the cone extends (the shaft ends at ~gizmo_scale)
+    let arrow_extension = gizmo_scale * 0.35;
 
     let axis_count = 3u32;
     let verts_per_arrow = indices.len();
@@ -457,10 +462,10 @@ pub fn build_fbx_gizmo_mesh(
 
         // -- Procedural cone arrowhead at the tip --
         // The FBX shaft extends ~30 units → after scale ≈ gizmo_scale.
-        // Place a cone at the tip of each axis arrow.
+        // Place a cone that extends BEYOND the shaft tip for visibility.
         let dir = axis.direction();
-        let tip = origin + dir * gizmo_scale;
-        let base_center = origin + dir * (gizmo_scale - cone_length);
+        let tip = origin + dir * (gizmo_scale + arrow_extension);
+        let base_center = origin + dir * (gizmo_scale + arrow_extension - cone_length);
 
         // Compute perpendicular frame for the cone
         let perp_a = if dir.cross(Vec3::Y).length_squared() > 0.001 {
