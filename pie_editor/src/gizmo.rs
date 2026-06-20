@@ -366,18 +366,17 @@ const FBX_GIZMO_SCALE_DIVISOR: f32 = 29.0;
 /// Convert FBX-loaded meshes (MeshVertex format) into GizmoVertex triangles
 /// with axis-based coloring.
 ///
-/// The FBX GizmosMoveTool model contains a single arrow along Blender's +Z
-/// axis. After applying the Blender Z-up → engine Y-up coordinate swap
-/// `(x, y, z) → (x, z, y)`, that becomes the +Y (green) arrow.
+/// The FBX GizmosMoveTool model contains two sub-meshes merged together:
+/// - **Cone (geo0)**: A narrow cone (radius 0.72) near the arrow base — too
+///   small to serve as a visible arrowhead since the shaft (radius 1.0) is wider.
+/// - **Shaft (geo1)**: A cylinder (radius ~1.0) extending ~30 units along +Z.
 ///
-/// To create the full 3-axis gizmo, this function generates three copies:
-/// - **+Y arrow (green)**: the original, rotated via `(x, z, y)`
-/// - **+X arrow (red)**: rotate the original by +90° around Z, then swap
-/// - **+Z arrow (blue)**: rotate the original by -90° around X, then swap
+/// Because the FBX cone arrowhead is narrower than the shaft and hidden inside
+/// it, this function generates procedural cone arrowheads at each arrow tip
+/// (like the fallback `build_gizmo_mesh`), using the FBX shaft for the body.
 ///
 /// If `sphere_vertices` and `sphere_indices` are provided, the GizmosSphere
-/// mesh is rendered at the gizmo origin with white/center coloring, serving
-/// as the center handle for uniform scaling.
+/// mesh is rendered at the gizmo origin with white/center coloring.
 ///
 /// Each vertex is colored based on which arrow it belongs to, with hover
 /// highlighting support.
@@ -398,17 +397,17 @@ pub fn build_fbx_gizmo_mesh(
     // Final scale: procedural gizmo scale divided by the FBX divisor
     let scale = gizmo_scale / FBX_GIZMO_SCALE_DIVISOR;
 
-    // The FBX arrow has the cone (arrowhead) near Z≈0 and the shaft extends
-    // to Z≈29 in Blender space. For a gizmo, we want the arrowhead at the
-    // TIP (far end). We mirror the arrow along Z: new_z = FBX_ARROW_LENGTH - z.
-    // This puts the shaft base near Z≈0 and the cone at Z≈29 (the tip).
-    const FBX_ARROW_LENGTH: f32 = 29.0;
+    // Proportions for the procedural arrowheads (matching build_gizmo_mesh)
+    let cone_length = gizmo_scale * 0.25;
+    let cone_radius = gizmo_scale * 0.09;
 
     let axis_count = 3u32;
     let verts_per_arrow = indices.len();
     let sphere_vert_count = sphere_indices.map(|si| si.len()).unwrap_or(0);
+    // Extra vertices for 3 procedural cone arrowheads (CONE_SEGMENTS * 2 tris * 3 verts each)
+    let cone_verts_per_axis = CONE_SEGMENTS * 6;
     let mut result = Vec::with_capacity(
-        (verts_per_arrow * axis_count as usize) + sphere_vert_count,
+        (verts_per_arrow * axis_count as usize) + sphere_vert_count + cone_verts_per_axis * 3,
     );
 
     for axis_idx in 0..axis_count {
@@ -426,6 +425,12 @@ pub fn build_fbx_gizmo_mesh(
             axis.color()
         };
 
+        // -- FBX shaft + cone body --
+        // The FBX arrow points along Blender +Z. After the (x,z,y) swap
+        // it becomes +Y in engine space. The FBX cone arrowhead is too
+        // narrow (radius 0.72) vs the shaft (radius 1.0), so it's hidden
+        // inside the shaft. We render the whole FBX mesh as-is and add a
+        // procedural arrowhead at the tip.
         for &idx in indices.iter() {
             let i = idx as usize;
             if i >= vertices.len() {
@@ -434,17 +439,11 @@ pub fn build_fbx_gizmo_mesh(
             let v = &vertices[i];
             let local = Vec3::from(v.position);
 
-            // Mirror along Z so the arrowhead moves to the tip.
-            // Also negate X to preserve triangle winding order (the mirror
-            // flips it, and negating X restores it).
-            let mirrored = Vec3::new(-local.x, local.y, FBX_ARROW_LENGTH - local.z);
-
-            // Apply pre-rotation in Blender space, then (x,z,y) swap to
-            // convert from Blender Z-up to engine Y-up.
+            // Apply pre-rotation in Blender space, then (x,z,y) swap.
             let rotated = match axis_idx {
-                0 => Vec3::new(mirrored.z, -mirrored.x, mirrored.y),  // +X
-                1 => Vec3::new(mirrored.x, mirrored.z, mirrored.y),   // +Y
-                2 => Vec3::new(mirrored.x, -mirrored.y, mirrored.z),  // +Z
+                0 => Vec3::new(local.z, -local.x, local.y),  // +X
+                1 => Vec3::new(local.x, local.z, local.y),   // +Y
+                2 => Vec3::new(local.x, -local.y, local.z),  // +Z
                 _ => unreachable!(),
             };
 
@@ -455,6 +454,23 @@ pub fn build_fbx_gizmo_mesh(
                 color,
             });
         }
+
+        // -- Procedural cone arrowhead at the tip --
+        // The FBX shaft extends ~30 units → after scale ≈ gizmo_scale.
+        // Place a cone at the tip of each axis arrow.
+        let dir = axis.direction();
+        let tip = origin + dir * gizmo_scale;
+        let base_center = origin + dir * (gizmo_scale - cone_length);
+
+        // Compute perpendicular frame for the cone
+        let perp_a = if dir.cross(Vec3::Y).length_squared() > 0.001 {
+            dir.cross(Vec3::Y).normalize()
+        } else {
+            dir.cross(Vec3::X).normalize()
+        };
+        let perp_b = dir.cross(perp_a).normalize();
+
+        push_cone(&mut result, base_center, tip, perp_a, perp_b, cone_radius, color);
     }
 
     // -- Center sphere from FBX (GizmosSphere) --
