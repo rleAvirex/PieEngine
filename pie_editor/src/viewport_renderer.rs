@@ -108,7 +108,8 @@ struct LineColorUniform {
     color: [f32; 4],
 }
 
-const LINE_VERTEX_COUNT: usize = 24;
+/// Number of vertices for thick AABB wireframe (12 edges × 2 tris/face × 2 faces × 3 verts = 144)
+const SELECTION_VERTEX_COUNT: usize = 144;
 
 struct UploadedEditorTexture {
     texture: wgpu::Texture,
@@ -144,7 +145,7 @@ pub struct EditorViewportRenderer {
     line_camera_bind_group: wgpu::BindGroup,
     line_color_buffer: wgpu::Buffer,
     line_color_bind_group: wgpu::BindGroup,
-    line_vertex_buffer: wgpu::Buffer,
+    selection_vertex_buffer: wgpu::Buffer,
     gizmo_pipeline: wgpu::RenderPipeline,
     gizmo_camera_buffer: wgpu::Buffer,
     gizmo_camera_bind_group: wgpu::BindGroup,
@@ -333,7 +334,7 @@ impl EditorViewportRenderer {
                 targets: &[Some(wgpu::ColorTargetState { format: target_format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })],
                 compilation_options: Default::default(),
             }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::LineList, strip_index_format: None, front_face: wgpu::FrontFace::Ccw, cull_mode: None, unclipped_depth: false, polygon_mode: wgpu::PolygonMode::Fill, conservative: false },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, strip_index_format: None, front_face: wgpu::FrontFace::Ccw, cull_mode: None, unclipped_depth: false, polygon_mode: wgpu::PolygonMode::Fill, conservative: false },
             depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH_FORMAT, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::Less, stencil: wgpu::StencilState::default(), bias: wgpu::DepthBiasState::default() }),
             multisample: wgpu::MultisampleState::default(), multiview: None, cache: None,
         });
@@ -356,8 +357,8 @@ impl EditorViewportRenderer {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: line_color_buffer.as_entire_binding() }],
         });
 
-        let line_vertex_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("editor viewport line vertex buffer"), size: (std::mem::size_of::<[f32; 3]>() * LINE_VERTEX_COUNT) as u64,
+        let selection_vertex_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("editor viewport selection vertex buffer"), size: (std::mem::size_of::<[f32; 3]>() * SELECTION_VERTEX_COUNT) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
         });
 
@@ -430,7 +431,7 @@ impl EditorViewportRenderer {
             fallback_texture, fallback_texture_view, materials: std::collections::HashMap::new(),
             drawables: Vec::new(), depth_texture, depth_texture_view, depth_size: [1, 1],
             line_pipeline, line_camera_buffer, line_camera_bind_group, line_color_buffer, line_color_bind_group,
-            line_vertex_buffer,
+            selection_vertex_buffer,
             gizmo_pipeline, gizmo_camera_buffer, gizmo_camera_bind_group, gizmo_vertex_buffer, gizmo_vertex_capacity: GIZMO_MAX_VERTICES,
             fbx_gizmo_move: None, fbx_gizmo_sphere: None,
         })
@@ -574,8 +575,8 @@ impl EditorViewportRenderer {
         }));
 
         if let Some((min, max)) = selection_aabb {
-            let v = aabb_line_vertices(min, max);
-            self.queue.as_ref().write_buffer(&self.line_vertex_buffer, 0, bytemuck::cast_slice(&v));
+            let v = aabb_thick_line_vertices(min, max);
+            self.queue.as_ref().write_buffer(&self.selection_vertex_buffer, 0, bytemuck::cast_slice(&v));
         }
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("editor viewport encoder") });
@@ -604,12 +605,12 @@ impl EditorViewportRenderer {
             }
 
             if selection_aabb.is_some() {
-                self.queue.as_ref().write_buffer(&self.line_color_buffer, 0, bytemuck::bytes_of(&LineColorUniform { color: [1.0, 0.85, 0.1, 1.0] }));
+                self.queue.as_ref().write_buffer(&self.line_color_buffer, 0, bytemuck::bytes_of(&LineColorUniform { color: [1.0, 0.5, 0.0, 1.0] }));
                 rp.set_pipeline(&self.line_pipeline);
                 rp.set_bind_group(0, &self.line_camera_bind_group, &[]);
                 rp.set_bind_group(1, &self.line_color_bind_group, &[]);
-                rp.set_vertex_buffer(0, self.line_vertex_buffer.slice(..));
-                rp.draw(0..LINE_VERTEX_COUNT as u32, 0..1);
+                rp.set_vertex_buffer(0, self.selection_vertex_buffer.slice(..));
+                rp.draw(0..SELECTION_VERTEX_COUNT as u32, 0..1);
             }
 
             if let Some(origin) = gizmo_origin {
@@ -665,13 +666,61 @@ fn upload_editor_texture(device: &wgpu::Device, queue: &wgpu::Queue, texture: &p
     UploadedEditorTexture { texture: gt, view }
 }
 
-fn aabb_line_vertices(min: Vec3, max: Vec3) -> [[f32; 3]; LINE_VERTEX_COUNT] {
+/// Generate thick AABB wireframe as triangle quads.
+///
+/// Each of the 12 edges of the AABB is rendered as a thin rectangular
+/// prism (2 faces × 2 triangles × 3 vertices = 12 vertices per edge,
+/// 144 vertices total). The `thickness` parameter controls the half-width
+/// of each edge strip in world space.
+fn aabb_thick_line_vertices(min: Vec3, max: Vec3) -> [[f32; 3]; SELECTION_VERTEX_COUNT] {
     let a = min; let g = max;
     let b = Vec3::new(g.x, a.y, a.z); let c = Vec3::new(g.x, g.y, a.z); let d = Vec3::new(a.x, g.y, a.z);
     let e = Vec3::new(a.x, a.y, g.z); let f = Vec3::new(g.x, a.y, g.z); let h = Vec3::new(a.x, g.y, g.z);
-    [
-        [a.x,a.y,a.z],[b.x,b.y,b.z],[b.x,b.y,b.z],[c.x,c.y,c.z],[c.x,c.y,c.z],[d.x,d.y,d.z],[d.x,d.y,d.z],[a.x,a.y,a.z],
-        [e.x,e.y,e.z],[f.x,f.y,f.z],[f.x,f.y,f.z],[g.x,g.y,g.z],[g.x,g.y,g.z],[h.x,h.y,h.z],[h.x,h.y,h.z],[e.x,e.y,e.z],
-        [a.x,a.y,a.z],[e.x,e.y,e.z],[b.x,b.y,b.z],[f.x,f.y,f.z],[c.x,c.y,c.z],[g.x,g.y,g.z],[d.x,d.y,d.z],[h.x,h.y,h.z],
-    ]
+
+    // 12 edges of the AABB
+    let edges: [(Vec3, Vec3); 12] = [
+        (a, b), (b, c), (c, d), (d, a),  // front face
+        (e, f), (f, g), (g, h), (h, e),  // back face
+        (a, e), (b, f), (c, g), (d, h),  // connecting edges
+    ];
+
+    let mut result = [[0.0f32; 3]; SELECTION_VERTEX_COUNT];
+    let t = 0.005; // half-thickness in world units
+
+    let mut idx = 0;
+    for (p0, p1) in &edges {
+        let dir = *p1 - *p0;
+        let _len = dir.length();
+        let dir_n = dir.normalize_or_zero();
+
+        // Find two perpendicular vectors to the edge direction
+        let perp1 = if dir_n.cross(Vec3::Y).length_squared() > 0.0001 {
+            dir_n.cross(Vec3::Y).normalize()
+        } else {
+            dir_n.cross(Vec3::X).normalize()
+        };
+        let perp2 = dir_n.cross(perp1).normalize();
+
+        // Generate a thin quad (2 triangles) for each of 2 perpendicular planes
+        // This creates a cross-shaped cross-section for each edge
+        for &perp in &[perp1, perp2] {
+            let offset = perp * t;
+            let v0 = *p0 - offset;
+            let v1 = *p0 + offset;
+            let v2 = *p1 + offset;
+            let v3 = *p1 - offset;
+
+            // Triangle 1: v0, v1, v2
+            result[idx] = [v0.x, v0.y, v0.z]; idx += 1;
+            result[idx] = [v1.x, v1.y, v1.z]; idx += 1;
+            result[idx] = [v2.x, v2.y, v2.z]; idx += 1;
+            // Triangle 2: v0, v2, v3
+            result[idx] = [v0.x, v0.y, v0.z]; idx += 1;
+            result[idx] = [v2.x, v2.y, v2.z]; idx += 1;
+            result[idx] = [v3.x, v3.y, v3.z]; idx += 1;
+        }
+    }
+
+    debug_assert_eq!(idx, SELECTION_VERTEX_COUNT);
+    result
 }
