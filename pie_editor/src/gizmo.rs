@@ -153,7 +153,7 @@ pub fn build_gizmo_mesh(
     let shaft_half_width = gizmo_scale * 0.028;   // thick shaft
     let cone_length = gizmo_scale * 0.25;          // prominent arrowhead
     let cone_radius = gizmo_scale * 0.09;          // wide cone
-    let center_radius = gizmo_scale * 0.085;        // center scale sphere (larger, easy to grab)
+    let center_radius = gizmo_scale * 0.17;        // center scale sphere (big, easy to grab)
 
     // -- Center scale sphere (white, highlights when hovered/active) --
     let is_center_active = hovered_center || matches!(gizmo_state, GizmoState::UniformScaling { .. });
@@ -329,20 +329,25 @@ fn push_tri(verts: &mut Vec<GizmoVertex>, a: Vec3, b: Vec3, c: Vec3, color: [f32
 ///
 /// The shaft starts just past the center sphere (dead zone) and ends where
 /// the cone begins. The perpendicular margin is generous so thin shafts
-/// are easy to click.
+/// are easy to click. The along-axis margin is tight so the AABB doesn't
+/// extend beyond the visual shaft.
 pub fn gizmo_shaft_aabb(origin: Vec3, axis: Axis, gizmo_scale: f32) -> (Vec3, Vec3) {
     let dir = axis.direction();
-    // Skip the center sphere area — dead zone so clicking the center
-    // sphere doesn't accidentally grab an axis.
-    let shaft_start_offset = gizmo_scale * 0.08;
-    let shaft_end_offset = gizmo_scale * 0.75; // cone starts at ~0.75
+    // Visual shaft: from origin to origin + dir * (scale - cone_length)
+    // where cone_length = 0.25 * scale. Skip the center sphere dead zone.
+    let shaft_start_offset = gizmo_scale * 0.20; // past the center sphere
+    let shaft_end_offset = gizmo_scale * 0.75;   // cone starts at scale - 0.25*scale = 0.75*scale
     let start = origin + dir * shaft_start_offset;
     let end = origin + dir * shaft_end_offset;
-    // Perpendicular margin: generous for easy clicking on the thin shaft.
-    let margin = gizmo_scale * 0.08;
-    let half = Vec3::splat(margin);
-    let min = start.min(end) - half;
-    let max = start.max(end) + half;
+
+    // Perpendicular margin (for the two axes perpendicular to the shaft):
+    // generous for easy clicking. Along-axis margin: small padding only.
+    let perp_margin = gizmo_scale * 0.06;
+    let along_margin = gizmo_scale * 0.02;
+
+    let along = dir * along_margin;
+    let min = start.min(end) - along - Vec3::splat(perp_margin);
+    let max = start.max(end) + along + Vec3::splat(perp_margin);
     (min, max)
 }
 
@@ -354,7 +359,8 @@ pub fn gizmo_tip_aabb(origin: Vec3, axis: Axis, gizmo_scale: f32) -> (Vec3, Vec3
 }
 
 /// Build a world-space AABB around the center scale sphere for ray-picking.
+/// Sized generously so it's easy to click, with priority over axis shafts.
 pub fn gizmo_center_aabb(origin: Vec3, gizmo_scale: f32) -> (Vec3, Vec3) {
-    let ext = Vec3::splat(gizmo_scale * 0.13);
+    let ext = Vec3::splat(gizmo_scale * 0.22);
     (origin - ext, origin + ext)
 }
