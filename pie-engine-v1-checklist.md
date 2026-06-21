@@ -104,7 +104,7 @@ Deliver a realistic v1 that proves the engine structure, shared runtime model, r
 
 ### 8. Performance basics
 
-- [ ] Add frame timing metrics
+- [x] Add frame timing metrics
 - [ ] Add simple profiling markers or scoped timing
 - [ ] Add `mimalloc` global allocator
 - [ ] Add frame-temporary allocation strategy with `bumpalo`

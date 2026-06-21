@@ -297,6 +297,22 @@ Add the engine-level optimizations that support the project's identity.
 - core engine tasks show measurable benefit from parallel execution where appropriate
 - profiling data can guide future optimization work
 
+### Status
+
+- **In progress — see `pie-engine-v1-checklist.md` section 8 (canonical).**
+- ✅ Frame timing metrics: `pie_runtime::profiling` module with `FrameTiming`
+  (input/sim/render/present phases), `FrameTimingHistory` (bounded ring buffer +
+  average + max_total), and `PhaseTimer` (RAII guard). Wired into
+  `run_main_loop_with_time_source` (records input + sim per frame; render/present
+  zero in the headless/main-loop path, populated by the client/editor render path
+  when present). `RuntimeApp` exposes `frame_timing_history()`/`_mut()` for the
+  editor overlay and benchmarks. 12 new tests. Cost: a handful of
+  `Instant::now()` calls per frame (ns-scale, well below noise floor).
+- ⬜ Scoped profiling markers (tracing/tracy, feature-gated, zero-cost when off).
+- ⬜ `mimalloc` global allocator.
+- ⬜ `bumpalo` frame-temporary allocator.
+- ⬜ Benchmark/regression scene with tracked budgets (CI-runnable).
+
 ## Milestone 10: Advanced rendering path
 
 ### Goal

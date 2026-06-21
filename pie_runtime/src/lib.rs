@@ -4,6 +4,7 @@ pub mod core;
 pub mod logging;
 pub mod loop_runner;
 pub mod platform;
+pub mod profiling;
 #[cfg(feature = "rendering")]
 pub mod rendering;
 
@@ -24,5 +25,6 @@ pub use loop_runner::{
     MainLoopLimits, StopSignal, TimeSource, WallClock, install_ctrlc_handler, run_main_loop,
     run_main_loop_with_time_source,
 };
+pub use profiling::{FramePhase, FrameTiming, FrameTimingHistory, PhaseTimer};
 #[cfg(feature = "rendering")]
 pub use rendering::run_client_window;

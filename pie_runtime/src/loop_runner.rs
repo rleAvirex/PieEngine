@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::core::RuntimeApp;
+use crate::profiling::{FrameTiming, PhaseTimer};
 
 /// Hard ceiling on a single frame's delta time, in seconds.
 ///
@@ -125,9 +126,21 @@ pub fn run_main_loop_with_time_source(
             break;
         }
 
-        let raw_delta_seconds = time_source.next_delta_seconds();
+        // Per-frame timing: input phase covers delta polling; sim phase covers
+        // the fixed-step accumulator + ticks. Render/present are zero in this
+        // loop (headless/main-loop path has no GPU work); the client window
+        // loop and the editor render path fill those when present.
+        let mut timing = FrameTiming::default();
+        let raw_delta_seconds = {
+            let _input_timer = PhaseTimer::new(&mut timing.input);
+            time_source.next_delta_seconds()
+        };
         let delta_seconds = raw_delta_seconds.min(MAX_FRAME_DELTA_SECONDS);
-        total_steps += app.update(delta_seconds);
+        {
+            let _sim_timer = PhaseTimer::new(&mut timing.sim);
+            total_steps += app.update(delta_seconds);
+        }
+        app.frame_timing_history_mut().push(timing);
     }
 
     app.shutdown();
@@ -256,5 +269,40 @@ mod tests {
         run_main_loop_with_time_source(&mut app, &signal, limits, &mut clock);
 
         assert!(!app.is_running());
+    }
+
+    #[test]
+    fn run_main_loop_records_per_frame_timing_history() {
+        // M9.1: the main loop must push a FrameTiming sample per iteration into
+        // the app's history, with the sim phase populated (input may be ~0 with
+        // a FixedStepClock, but sim must be nonzero after at least one tick).
+        let mut app = RuntimeApp::from_args(["pie_runtime"]).expect("default args should parse");
+        let signal = StopSignal::new();
+        let limits = MainLoopLimits { max_steps: Some(3) };
+        let mut clock = FixedStepClock {
+            delta_seconds: 1.0 / 60.0,
+        };
+
+        run_main_loop_with_time_source(&mut app, &signal, limits, &mut clock);
+
+        let history = app.frame_timing_history();
+        // The loop runs until 3 steps are completed. With a 1/60s delta and
+        // 1/60s timestep, each iteration completes exactly 1 step, so the loop
+        // runs 3 iterations before the max_steps check stops it.
+        assert!(
+            !history.is_empty(),
+            "history should contain at least one frame's timing, got {}",
+            history.len()
+        );
+        let last = history.last().expect("history should be non-empty");
+        // sim must be nonzero: at least one simulation tick ran.
+        assert!(
+            last.sim.as_nanos() > 0,
+            "sim phase should be nonzero after running a tick, was {:?}",
+            last.sim
+        );
+        // render/present are zero in the headless/main-loop path.
+        assert_eq!(last.render.as_nanos(), 0);
+        assert_eq!(last.present.as_nanos(), 0);
     }
 }

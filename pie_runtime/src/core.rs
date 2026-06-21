@@ -223,6 +223,7 @@ pub struct RuntimeApp {
     simulation: SimulationCore,
     running: bool,
     accumulated_time_seconds: f64,
+    frame_timing_history: crate::profiling::FrameTimingHistory,
 }
 
 impl RuntimeApp {
@@ -238,6 +239,7 @@ impl RuntimeApp {
             simulation: SimulationCore::new(),
             running: false,
             accumulated_time_seconds: 0.0,
+            frame_timing_history: crate::profiling::FrameTimingHistory::default(),
         })
     }
 
@@ -317,6 +319,21 @@ impl RuntimeApp {
 
     pub fn accumulated_time_seconds(&self) -> f64 {
         self.accumulated_time_seconds
+    }
+
+    /// The rolling per-frame timing history (input/sim/render/present).
+    ///
+    /// Always available — the lightweight metrics layer (M9.1) is on by design.
+    /// The editor overlay reads this for its frame-time graph; the benchmark
+    /// harness reads it for regression checks.
+    pub fn frame_timing_history(&self) -> &crate::profiling::FrameTimingHistory {
+        &self.frame_timing_history
+    }
+
+    /// Mutable access to the timing history, for loop integrators that push
+    /// per-frame samples and for tests that want to reset/inspect the buffer.
+    pub fn frame_timing_history_mut(&mut self) -> &mut crate::profiling::FrameTimingHistory {
+        &mut self.frame_timing_history
     }
 
     pub fn update(&mut self, delta_seconds: f64) -> u64 {
