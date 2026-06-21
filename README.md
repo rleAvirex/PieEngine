@@ -37,3 +37,5 @@ cargo test --all-targets --all-features
 - the workspace targets Windows, Linux, and macOS
 - `pie_runtime` is designed to stay free of editor dependencies
 - the long-term plan is documented in `pie-engine-project-brief.md` and `pie-engine-milestones-and-plan.md`
+- v1 item-level status lives in `pie-engine-v1-checklist.md` (canonical source of truth)
+- systems intentionally excluded from v1 are tracked in `pie-engine-future-systems.md`
