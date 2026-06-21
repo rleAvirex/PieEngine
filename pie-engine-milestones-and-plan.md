@@ -17,6 +17,14 @@ This document turns the project brief into a practical execution plan for buildi
 - Add instrumentation and benchmarks early so performance decisions are evidence-based
 - Treat determinism and shipping constraints as architecture requirements, not polish
 
+## Source of truth for status
+
+**`pie-engine-v1-checklist.md` is the canonical source of truth for item-level v1
+completion status.** The per-milestone "Status" blocks below are summaries that
+reference the checklist; they must not contradict it. When the two disagree, the
+checklist wins and this document is the one that gets fixed. Doc drift is treated
+as a bug, not a backlog item.
+
 ## Milestone 0: Workspace foundation
 
 ### Goal
@@ -226,13 +234,28 @@ Create the path from editable source assets to shippable builds.
 
 ### Status
 
-- complete
-- `pie_tools` CLI with `cook` and `export` commands (clap-based)
-- `.pak` binary format: header + type-tagged asset entries (mesh, texture, shader, material)
-- cooking pipeline: shaders (WGSL source), textures (raw RGBA), meshes (GPU-ready vertices/indices), materials (PBR params)
-- runtime `load_pak` populates `AssetRegistry` directly from cooked data (no decode/parse)
-- `pie_tools export` runs cook + `cargo build --release -p pie_runtime` and copies binary to output
-- 94 tests pass (88 runtime + 4 editor + 2 tools); end-to-end verified cooking sample assets
+- **Not fully verified — see `pie-engine-v1-checklist.md` section 7 and the V1 exit
+  criteria.** The checklist is canonical; this block is a summary.
+- Implemented: `pie_tools` CLI with `cook` and `export` commands (clap-based); `.pak`
+  binary format (header + type-tagged asset entries: mesh, texture, shader, material);
+  cooking pipeline (shaders as WGSL source, textures as raw RGBA, meshes in GPU-ready
+  vertex/index layout, materials as PBR params); runtime `load_pak` populates
+  `AssetRegistry` directly from cooked data with no decode/parse; `pie_tools export`
+  runs cook + `cargo build --release -p pie_runtime` and copies the binary to the
+  output directory.
+- Tested: `cook_assets` produces the expected asset set (`cook_sample_assets_produces_expected_assets`);
+  `PakFile` write/read round-trip and rejection of invalid magic/version/kind
+  (5 tests in `pie_runtime::assets::pak`); `load_pak` round-trips a cooked pak into a
+  populated `AssetRegistry` (`load_pak_round_trip`).
+- **Gap (unchecked checklist item):** the full `export` command producing **both** a runtime
+  binary **and** `assets.pak` together is not exercised by an automated test, because
+  doing so requires a release build of `pie_runtime` (minutes-scale). The export code
+  path exists and the cook + `load_pak` halves are each verified, but the end-to-end
+  "binary + packaged assets in one output dir" claim is not yet test-verified. This is
+  tracked by the unchecked V1 exit-criterion "Export produces a runtime binary plus
+  packaged assets" and will be closed by a CI-runnable integration test (see M9's
+  benchmark/regression work, which establishes the CI harness that such a test belongs
+  in).
 
 ## Milestone 8: Networking prototype
 
@@ -335,9 +358,14 @@ Pursue the higher-end rendering features only after the baseline is stable.
 
 ## Immediate next steps
 
-- begin Milestone 7: asset cooking and export pipeline (`pie_tools` command structure, shader compilation, `.pak` packaging)
-- add `mimalloc` global allocator and `bumpalo` frame allocator (M9 groundwork)
-- plan KTX2 integration for cooked texture assets
+- Milestone 7 (asset cooking and export pipeline) is implemented; the only open v1
+  item is the end-to-end export integration test (tracked in the checklist).
+- **Milestone 9 (Performance basics) is the current focus** — see
+  `pie-engine-v1-checklist.md` section 8. Items: frame timing metrics, scoped
+  profiling markers (feature-gated, zero-cost when off), `mimalloc` global allocator,
+  `bumpalo` frame-temporary allocator, and a CI-runnable benchmark/regression scene
+  with tracked frame-time budgets.
+- Plan KTX2 integration for cooked texture assets (post-v1).
 
 ## Realistic v1 scope
 
