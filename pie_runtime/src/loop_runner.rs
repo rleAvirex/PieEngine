@@ -119,10 +119,10 @@ pub fn run_main_loop_with_time_source(
     let mut total_steps: u64 = 0;
 
     while stop_signal.should_continue() {
-        if let Some(max_steps) = limits.max_steps {
-            if total_steps >= max_steps {
-                break;
-            }
+        if let Some(max_steps) = limits.max_steps
+            && total_steps >= max_steps
+        {
+            break;
         }
 
         let raw_delta_seconds = time_source.next_delta_seconds();

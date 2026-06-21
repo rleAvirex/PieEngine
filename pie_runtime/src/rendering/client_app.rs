@@ -99,8 +99,8 @@ impl ApplicationHandler for ClientApp {
 
         // Create the loading screen — this sets up the GPU and shows a
         // progress indicator immediately, before loading any scene assets.
-        let loading_screen = LoadingScreen::new(window.clone())
-            .expect("loading screen should initialize");
+        let loading_screen =
+            LoadingScreen::new(window.clone()).expect("loading screen should initialize");
 
         self.window = Some(window);
         self.loading_screen = Some(loading_screen);
@@ -209,7 +209,10 @@ impl ClientApp {
         }
 
         // Create the full renderer (reuses the same window)
-        let window = self.window.clone().expect("window should exist during transition");
+        let window = self
+            .window
+            .clone()
+            .expect("window should exist during transition");
         let mut renderer = match Renderer::new(window, &self.assets_root) {
             Ok(r) => r,
             Err(error) => {

@@ -124,10 +124,7 @@ pub fn load_gltf_scene(
 
             let tangents = reader
                 .read_tangents()
-                .map(|t| {
-                    t.map(|t| [t[0], t[1], t[2], t[3]])
-                        .collect::<Vec<_>>()
-                })
+                .map(|t| t.map(|t| [t[0], t[1], t[2], t[3]]).collect::<Vec<_>>())
                 .unwrap_or_else(|| vec![[1.0, 0.0, 0.0, 1.0]; positions.len()]);
 
             let base_index = combined_vertices.len() as u32;
@@ -140,10 +137,10 @@ pub fn load_gltf_scene(
                 });
             }
 
-            if let Some(material) = primitive.material().index() {
-                if let Some(handle) = material_handles.get(material) {
-                    mesh_material = *handle;
-                }
+            if let Some(material) = primitive.material().index()
+                && let Some(handle) = material_handles.get(material)
+            {
+                mesh_material = *handle;
             }
 
             if let Some(indices) = reader.read_indices() {
@@ -178,13 +175,7 @@ pub fn load_gltf_scene(
     let mut active_camera_index = None;
 
     for node in scene.nodes() {
-        collect_node(
-            path,
-            node,
-            &mesh_handles,
-            &mut nodes,
-            &mut active_camera_index,
-        );
+        collect_node(node, &mesh_handles, &mut nodes, &mut active_camera_index);
     }
 
     Ok(ImportedScene {
@@ -195,7 +186,6 @@ pub fn load_gltf_scene(
 }
 
 fn collect_node(
-    path: &Path,
     node: gltf::Node,
     mesh_handles: &[MeshHandle],
     nodes: &mut Vec<ImportedNode>,
@@ -214,7 +204,7 @@ fn collect_node(
             mesh_handles
                 .get(index)
                 .copied()
-                .ok_or_else(|| AssetError::InvalidHandle {
+                .ok_or(AssetError::InvalidHandle {
                     kind: "mesh",
                     index: index as u32,
                 })
@@ -229,7 +219,7 @@ fn collect_node(
     nodes.push(imported);
 
     for child in node.children() {
-        collect_node(path, child, mesh_handles, nodes, active_camera_index);
+        collect_node(child, mesh_handles, nodes, active_camera_index);
     }
 }
 

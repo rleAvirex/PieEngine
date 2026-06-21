@@ -168,20 +168,19 @@ impl LoadingScreen {
             source: wgpu::ShaderSource::Wgsl(LOADING_SHADER.into()),
         });
 
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("loading bind group layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("loading bind group layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("loading screen pipeline layout"),
@@ -221,16 +220,15 @@ impl LoadingScreen {
         let uniform = LoadingUniform {
             progress: 0.0,
             _padding: [0.0; 3],
-            bg_color: [0.08, 0.08, 0.10, 1.0],     // dark charcoal
-            bar_color: [0.95, 0.55, 0.15, 1.0],     // Pie Engine orange
+            bg_color: [0.08, 0.08, 0.10, 1.0],  // dark charcoal
+            bar_color: [0.95, 0.55, 0.15, 1.0], // Pie Engine orange
         };
 
-        let progress_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("loading uniform buffer"),
-                contents: bytemuck::cast_slice(&[uniform]),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
+        let progress_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("loading uniform buffer"),
+            contents: bytemuck::cast_slice(&[uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
 
         let progress_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("loading bind group"),
@@ -331,7 +329,12 @@ impl LoadingScreen {
     /// from the loading screen to the full renderer.
     pub fn into_gpu_parts(
         self,
-    ) -> (wgpu::Surface<'static>, wgpu::Device, wgpu::Queue, wgpu::SurfaceConfiguration) {
+    ) -> (
+        wgpu::Surface<'static>,
+        wgpu::Device,
+        wgpu::Queue,
+        wgpu::SurfaceConfiguration,
+    ) {
         (self.surface, self.device, self.queue, self.config)
     }
 }
@@ -342,6 +345,10 @@ mod tests {
     fn loading_uniform_size_is_16_byte_aligned() {
         // The uniform struct must be valid for bytemuck casting
         let size = std::mem::size_of::<super::LoadingUniform>();
-        assert_eq!(size % 16, 0, "LoadingUniform must be 16-byte aligned for GPU");
+        assert_eq!(
+            size % 16,
+            0,
+            "LoadingUniform must be 16-byte aligned for GPU"
+        );
     }
 }

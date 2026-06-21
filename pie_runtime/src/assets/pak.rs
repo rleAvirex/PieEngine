@@ -137,9 +137,7 @@ mod tests {
 
     #[test]
     fn pak_round_trip_empty() {
-        let pak = PakFile {
-            assets: Vec::new(),
-        };
+        let pak = PakFile { assets: Vec::new() };
         let mut buf = Vec::new();
         pak.write(&mut buf).expect("write should succeed");
         let read_back = PakFile::read(&mut buf.as_slice()).expect("read should succeed");

@@ -129,8 +129,12 @@ impl SimulationCore {
     }
 
     pub fn bootstrap_scene(&mut self) -> Entity {
-        self.world
-            .spawn((Name::new("MainCamera"), ActiveCamera, Camera::default(), Transform::default()))
+        self.world.spawn((
+            Name::new("MainCamera"),
+            ActiveCamera,
+            Camera::default(),
+            Transform::default(),
+        ))
     }
 
     pub fn bootstrap_scene_with_summary(&mut self) -> BootstrapSceneResult {

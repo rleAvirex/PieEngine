@@ -48,12 +48,7 @@ pub fn camera_view_proj(transform: Transform, aspect_ratio: f32, fov: f32) -> Ma
     );
     let view = world.inverse();
     let projection = OPENGL_TO_WGPU_MATRIX
-        * Mat4::perspective_rh(
-            fov.max(0.01),
-            aspect_ratio.max(0.01),
-            0.1,
-            100.0,
-        );
+        * Mat4::perspective_rh(fov.max(0.01), aspect_ratio.max(0.01), 0.1, 100.0);
     projection * view
 }
 

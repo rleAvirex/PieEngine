@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pie_runtime::assets::{load_gltf_scene, AssetError, AssetRegistry};
+use pie_runtime::assets::{AssetError, AssetRegistry, load_gltf_scene};
 
 use crate::pak::{CookedAssetKind, PakAsset, PakFile};
 

@@ -24,18 +24,18 @@ impl Axis {
     /// RGBA base color for this axis (not hovered).
     pub fn color(self) -> [f32; 4] {
         match self {
-            Self::X => [0.255, 0.0, 0.0, 1.0],   // red
-            Self::Y => [0.22, 0.85, 0.30, 1.0],   // green
-            Self::Z => [0.25, 0.45, 0.95, 1.0],   // blue
+            Self::X => [0.255, 0.0, 0.0, 1.0],  // red
+            Self::Y => [0.22, 0.85, 0.30, 1.0], // green
+            Self::Z => [0.25, 0.45, 0.95, 1.0], // blue
         }
     }
 
     /// RGBA highlight color for this axis when hovered or dragged.
     pub fn highlight_color(self) -> [f32; 4] {
         match self {
-            Self::X => [1.0, 0.55, 0.45, 1.0],   // bright red-orange
-            Self::Y => [0.45, 1.0, 0.55, 1.0],   // bright green
-            Self::Z => [0.50, 0.70, 1.0, 1.0],   // bright blue
+            Self::X => [1.0, 0.55, 0.45, 1.0], // bright red-orange
+            Self::Y => [0.45, 1.0, 0.55, 1.0], // bright green
+            Self::Z => [0.50, 0.70, 1.0, 1.0], // bright blue
         }
     }
 
@@ -138,19 +138,28 @@ pub fn build_gizmo_mesh(
     let up_corrected = right.cross(to_cam).normalize_or_zero();
 
     // Proportions relative to gizmo_scale (like UE5/Unity)
-    let shaft_half_width = gizmo_scale * 0.028;   // thick shaft
-    let cone_length = gizmo_scale * 0.25;          // prominent arrowhead
-    let cone_radius = gizmo_scale * 0.09;          // wide cone
-    let center_radius = gizmo_scale * 0.17;        // center scale sphere (big, easy to grab)
+    let shaft_half_width = gizmo_scale * 0.028; // thick shaft
+    let cone_length = gizmo_scale * 0.25; // prominent arrowhead
+    let cone_radius = gizmo_scale * 0.09; // wide cone
+    let center_radius = gizmo_scale * 0.17; // center scale sphere (big, easy to grab)
 
     // -- Center scale sphere (white, highlights when hovered/active) --
-    let is_center_active = hovered_center || matches!(gizmo_state, GizmoState::UniformScaling { .. });
+    let is_center_active =
+        hovered_center || matches!(gizmo_state, GizmoState::UniformScaling { .. });
     let center_color = if is_center_active {
-        [1.0, 1.0, 1.0, 1.0]       // bright white when hovered/active
+        [1.0, 1.0, 1.0, 1.0] // bright white when hovered/active
     } else {
-        [0.85, 0.85, 0.85, 1.0]    // light gray normally
+        [0.85, 0.85, 0.85, 1.0] // light gray normally
     };
-    push_icosphere(&mut verts, origin, right, up_corrected, to_cam, center_radius, center_color);
+    push_icosphere(
+        &mut verts,
+        origin,
+        right,
+        up_corrected,
+        to_cam,
+        center_radius,
+        center_color,
+    );
 
     // -- Per-axis: thick box shaft + cone arrowhead --
     let active_axis = gizmo_state.dragged_axis();
@@ -179,11 +188,27 @@ pub fn build_gizmo_mesh(
 
         // Shaft: thick box from origin to (origin + dir * (scale - cone_length))
         let shaft_end = origin + dir * (gizmo_scale - cone_length);
-        push_shaft_box(&mut verts, origin, shaft_end, perp_a, perp_b, shaft_half_width, color);
+        push_shaft_box(
+            &mut verts,
+            origin,
+            shaft_end,
+            perp_a,
+            perp_b,
+            shaft_half_width,
+            color,
+        );
 
         // Cone arrowhead
         let cone_tip = origin + dir * gizmo_scale;
-        push_cone(&mut verts, shaft_end, cone_tip, perp_a, perp_b, cone_radius, color);
+        push_cone(
+            &mut verts,
+            shaft_end,
+            cone_tip,
+            perp_a,
+            perp_b,
+            cone_radius,
+            color,
+        );
     }
 
     verts
@@ -292,10 +317,26 @@ fn push_icosphere(
 
     // 20 triangular faces of the icosahedron.
     let faces: [(usize, usize, usize); 20] = [
-        (0, 11, 5),  (0, 5, 1),   (0, 1, 7),   (0, 7, 10),  (0, 10, 11),
-        (1, 5, 9),   (5, 11, 4),  (11, 10, 2),  (10, 7, 6),  (7, 1, 8),
-        (3, 9, 4),   (3, 4, 2),   (3, 2, 6),    (3, 6, 8),   (3, 8, 9),
-        (4, 9, 5),   (2, 4, 11),  (6, 2, 10),   (8, 6, 7),   (9, 8, 1),
+        (0, 11, 5),
+        (0, 5, 1),
+        (0, 1, 7),
+        (0, 7, 10),
+        (0, 10, 11),
+        (1, 5, 9),
+        (5, 11, 4),
+        (11, 10, 2),
+        (10, 7, 6),
+        (7, 1, 8),
+        (3, 9, 4),
+        (3, 4, 2),
+        (3, 2, 6),
+        (3, 6, 8),
+        (3, 8, 9),
+        (4, 9, 5),
+        (2, 4, 11),
+        (6, 2, 10),
+        (8, 6, 7),
+        (9, 8, 1),
     ];
 
     for (a, b, c) in &faces {
@@ -304,9 +345,18 @@ fn push_icosphere(
 }
 
 fn push_tri(verts: &mut Vec<GizmoVertex>, a: Vec3, b: Vec3, c: Vec3, color: [f32; 4]) {
-    verts.push(GizmoVertex { position: [a.x, a.y, a.z], color });
-    verts.push(GizmoVertex { position: [b.x, b.y, b.z], color });
-    verts.push(GizmoVertex { position: [c.x, c.y, c.z], color });
+    verts.push(GizmoVertex {
+        position: [a.x, a.y, a.z],
+        color,
+    });
+    verts.push(GizmoVertex {
+        position: [b.x, b.y, b.z],
+        color,
+    });
+    verts.push(GizmoVertex {
+        position: [c.x, c.y, c.z],
+        color,
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +374,7 @@ pub fn gizmo_shaft_aabb(origin: Vec3, axis: Axis, gizmo_scale: f32) -> (Vec3, Ve
     // Visual shaft: from origin to origin + dir * (scale - cone_length)
     // where cone_length = 0.25 * scale. Skip the center sphere dead zone.
     let shaft_start_offset = gizmo_scale * 0.20; // past the center sphere
-    let shaft_end_offset = gizmo_scale * 0.75;   // cone starts at scale - 0.25*scale = 0.75*scale
+    let shaft_end_offset = gizmo_scale * 0.75; // cone starts at scale - 0.25*scale = 0.75*scale
     let start = origin + dir * shaft_start_offset;
     let end = origin + dir * shaft_end_offset;
 
@@ -382,6 +432,13 @@ const FBX_GIZMO_SCALE_DIVISOR: f32 = 29.0;
 ///
 /// Each vertex is colored based on which arrow it belongs to, with hover
 /// highlighting support.
+///
+/// Many inputs, but each is a distinct, independently-set gizmo parameter
+/// (mesh data, sphere handle data, scale, hover/selection state). Bundling
+/// them would obscure which input comes from which editor subsystem; the
+/// arg count is acknowledged here and revisited if the gizmo system is
+/// refactored.
+#[allow(clippy::too_many_arguments)]
 pub fn build_fbx_gizmo_mesh(
     origin: Vec3,
     vertices: &[pie_runtime::assets::MeshVertex],
@@ -394,7 +451,8 @@ pub fn build_fbx_gizmo_mesh(
     gizmo_state: GizmoState,
 ) -> Vec<GizmoVertex> {
     let active_axis = gizmo_state.dragged_axis();
-    let is_center_active = hovered_center || matches!(gizmo_state, GizmoState::UniformScaling { .. });
+    let is_center_active =
+        hovered_center || matches!(gizmo_state, GizmoState::UniformScaling { .. });
 
     // Final scale: procedural gizmo scale divided by the FBX divisor
     let scale = gizmo_scale / FBX_GIZMO_SCALE_DIVISOR;
@@ -446,9 +504,9 @@ pub fn build_fbx_gizmo_mesh(
 
             // Apply pre-rotation in Blender space, then (x,z,y) swap.
             let rotated = match axis_idx {
-                0 => Vec3::new(local.z, -local.x, local.y),  // +X
-                1 => Vec3::new(local.x, local.z, local.y),   // +Y
-                2 => Vec3::new(local.x, -local.y, local.z),  // +Z
+                0 => Vec3::new(local.z, -local.x, local.y), // +X
+                1 => Vec3::new(local.x, local.z, local.y),  // +Y
+                2 => Vec3::new(local.x, -local.y, local.z), // +Z
                 _ => unreachable!(),
             };
 
@@ -475,7 +533,15 @@ pub fn build_fbx_gizmo_mesh(
         };
         let perp_b = dir.cross(perp_a).normalize();
 
-        push_cone(&mut result, base_center, tip, perp_a, perp_b, cone_radius, color);
+        push_cone(
+            &mut result,
+            base_center,
+            tip,
+            perp_a,
+            perp_b,
+            cone_radius,
+            color,
+        );
     }
 
     // -- Center sphere from FBX (GizmosSphere) --
@@ -484,9 +550,9 @@ pub fn build_fbx_gizmo_mesh(
     // to match the procedural gizmo's center sphere size (0.17 * gizmo_scale).
     if let (Some(sp_verts), Some(sp_indices)) = (sphere_vertices, sphere_indices) {
         let center_color = if is_center_active {
-            [1.0, 1.0, 1.0, 1.0]       // bright white when hovered/active
+            [1.0, 1.0, 1.0, 1.0] // bright white when hovered/active
         } else {
-            [0.85, 0.85, 0.85, 1.0]    // light gray normally
+            [0.85, 0.85, 0.85, 1.0] // light gray normally
         };
 
         // The FBX sphere radius is ~1.0. Match the procedural center sphere:

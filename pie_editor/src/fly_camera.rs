@@ -96,9 +96,7 @@ impl EditorCamera {
         let right_horizontal = self.right_xz();
         let vertical = Vec3::Y * move_axis.z;
 
-        let displacement = (forward_3d * move_axis.x
-            + right_horizontal * move_axis.y
-            + vertical)
+        let displacement = (forward_3d * move_axis.x + right_horizontal * move_axis.y + vertical)
             .normalize_or_zero()
             * self.move_speed
             * dt;

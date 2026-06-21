@@ -4,37 +4,39 @@
 //! the Unreal Engine 5 editor aesthetic. Flat panels, minimal rounding,
 //! compact spacing, and a clean industrial look.
 
-use egui::{Color32, CornerRadius, Margin, Stroke, Vec2, Visuals, Style, FontId, FontFamily, TextStyle};
+use egui::{
+    Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, Style, TextStyle, Vec2, Visuals,
+};
 
 // -- UE5-inspired Palette --
 // Backgrounds (charcoal grays, no blue/purple tint)
-pub const BG_WINDOW: Color32 = Color32::from_rgb(21, 21, 21);        // #151515 — main window
-pub const BG_SIDEBAR: Color32 = Color32::from_rgb(30, 30, 30);       // #1E1E1E — panels
-pub const BG_TOOLBAR: Color32 = Color32::from_rgb(35, 35, 35);       // #232323 — toolbar
-pub const BG_VIEWPORT: Color32 = Color32::from_rgb(12, 12, 12);      // #0C0C0C — darkest
-pub const BG_WIDGET: Color32 = Color32::from_rgb(42, 42, 42);        // #2A2A2A — inputs
-pub const BG_WIDGET_HOVER: Color32 = Color32::from_rgb(52, 52, 52);  // #343434 — hover
+pub const BG_WINDOW: Color32 = Color32::from_rgb(21, 21, 21); // #151515 — main window
+pub const BG_SIDEBAR: Color32 = Color32::from_rgb(30, 30, 30); // #1E1E1E — panels
+pub const BG_TOOLBAR: Color32 = Color32::from_rgb(35, 35, 35); // #232323 — toolbar
+pub const BG_VIEWPORT: Color32 = Color32::from_rgb(12, 12, 12); // #0C0C0C — darkest
+pub const BG_WIDGET: Color32 = Color32::from_rgb(42, 42, 42); // #2A2A2A — inputs
+pub const BG_WIDGET_HOVER: Color32 = Color32::from_rgb(52, 52, 52); // #343434 — hover
 
 // Accents (UE5 blue-orange system)
-pub const ACCENT_PRIMARY: Color32 = Color32::from_rgb(46, 120, 210);     // UE5 blue
+pub const ACCENT_PRIMARY: Color32 = Color32::from_rgb(46, 120, 210); // UE5 blue
 pub const ACCENT_SECONDARY: Color32 = Color32::from_rgb(120, 175, 255); // light blue
-pub const ACCENT_SUCCESS: Color32 = Color32::from_rgb(60, 200, 110);    // green
-pub const ACCENT_PLAY: Color32 = Color32::from_rgb(60, 200, 110);       // play green
-pub const ACCENT_DANGER: Color32 = Color32::from_rgb(220, 60, 60);      // red
-pub const ACCENT_ORANGE: Color32 = Color32::from_rgb(255, 140, 30);     // UE5 orange accent
+pub const ACCENT_SUCCESS: Color32 = Color32::from_rgb(60, 200, 110); // green
+pub const ACCENT_PLAY: Color32 = Color32::from_rgb(60, 200, 110); // play green
+pub const ACCENT_DANGER: Color32 = Color32::from_rgb(220, 60, 60); // red
+pub const ACCENT_ORANGE: Color32 = Color32::from_rgb(255, 140, 30); // UE5 orange accent
 
 // Text (high contrast on dark)
-pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(220, 220, 220);      // #DCDCDC
-pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(155, 155, 155);    // #9B9B9B
-pub const TEXT_DIM: Color32 = Color32::from_rgb(90, 90, 90);            // #5A5A5A
+pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(220, 220, 220); // #DCDCDC
+pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(155, 155, 155); // #9B9B9B
+pub const TEXT_DIM: Color32 = Color32::from_rgb(90, 90, 90); // #5A5A5A
 
 // Borders & separators (subtle gray)
-pub const BORDER_SUBTLE: Color32 = Color32::from_rgb(50, 50, 50);        // #323232
-pub const BORDER_STRONG: Color32 = Color32::from_rgb(70, 70, 70);        // #464646
-pub const SEPARATOR: Color32 = Color32::from_rgb(50, 50, 50);            // #323232
+pub const BORDER_SUBTLE: Color32 = Color32::from_rgb(50, 50, 50); // #323232
+pub const BORDER_STRONG: Color32 = Color32::from_rgb(70, 70, 70); // #464646
+pub const SEPARATOR: Color32 = Color32::from_rgb(50, 50, 50); // #323232
 
 // Selection (UE5 blue)
-pub const SELECTION_BG: Color32 = Color32::from_rgb(30, 55, 90);         // dark blue tint
+pub const SELECTION_BG: Color32 = Color32::from_rgb(30, 55, 90); // dark blue tint
 pub const SELECTION_BORDER: Color32 = ACCENT_PRIMARY;
 
 // Viewport border
@@ -42,7 +44,7 @@ pub const VIEWPORT_BORDER: Color32 = Color32::from_rgb(50, 50, 50);
 pub const VIEWPORT_BORDER_ACTIVE: Color32 = ACCENT_PRIMARY;
 
 // Section header background
-pub const BG_SECTION: Color32 = Color32::from_rgb(40, 40, 40);           // #282828
+pub const BG_SECTION: Color32 = Color32::from_rgb(40, 40, 40); // #282828
 
 // -- CornerRadius (UE5 = flat, no rounding) --
 pub const ROUNDING_SM: CornerRadius = CornerRadius::same(2);
@@ -136,14 +138,28 @@ pub fn apply(ctx: &egui::Context) {
 
     // Text styles (smaller, tighter like UE5)
     let mut text_styles = [
-        (TextStyle::Heading, FontId::new(14.0, FontFamily::Proportional)),
+        (
+            TextStyle::Heading,
+            FontId::new(14.0, FontFamily::Proportional),
+        ),
         (TextStyle::Body, FontId::new(12.0, FontFamily::Proportional)),
-        (TextStyle::Monospace, FontId::new(11.0, FontFamily::Monospace)),
-        (TextStyle::Button, FontId::new(12.0, FontFamily::Proportional)),
-        (TextStyle::Small, FontId::new(10.0, FontFamily::Proportional)),
+        (
+            TextStyle::Monospace,
+            FontId::new(11.0, FontFamily::Monospace),
+        ),
+        (
+            TextStyle::Button,
+            FontId::new(12.0, FontFamily::Proportional),
+        ),
+        (
+            TextStyle::Small,
+            FontId::new(10.0, FontFamily::Proportional),
+        ),
     ];
     for (text_style, font_id) in &mut text_styles {
-        style.text_styles.insert(text_style.clone(), font_id.clone());
+        style
+            .text_styles
+            .insert(text_style.clone(), font_id.clone());
     }
 
     ctx.set_style(style);

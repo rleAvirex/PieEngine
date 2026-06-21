@@ -285,7 +285,9 @@ impl Renderer {
                         },
                         wgpu::VertexAttribute {
                             format: wgpu::VertexFormat::Float32x4,
-                            offset: (std::mem::size_of::<[f32; 3]>() * 2 + std::mem::size_of::<[f32; 2]>()) as wgpu::BufferAddress,
+                            offset: (std::mem::size_of::<[f32; 3]>() * 2
+                                + std::mem::size_of::<[f32; 2]>())
+                                as wgpu::BufferAddress,
                             shader_location: 3,
                         },
                     ],
@@ -522,9 +524,7 @@ impl Renderer {
             .as_ref()
             .map(|t| &t.view)
             .unwrap_or(&self.fallback_texture_view);
-        let normal_view_ref = normal_view
-            .as_ref()
-            .unwrap_or(&self.fallback_texture_view);
+        let normal_view_ref = normal_view.as_ref().unwrap_or(&self.fallback_texture_view);
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material bind group"),
@@ -566,8 +566,7 @@ impl Renderer {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
 
-        let (depth_texture, depth_texture_view) =
-            create_depth_texture(&self.device, width, height);
+        let (depth_texture, depth_texture_view) = create_depth_texture(&self.device, width, height);
         self.depth_texture = depth_texture;
         self.depth_texture_view = depth_texture_view;
     }

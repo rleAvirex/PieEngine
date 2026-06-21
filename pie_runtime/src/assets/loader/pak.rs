@@ -97,7 +97,8 @@ pub fn load_pak(path: &Path) -> Result<AssetRegistry, AssetError> {
         let kind = kind_slice[0];
 
         let name_len =
-            u32::from_le_bytes(read_bytes(&data, &mut offset, 4, path)?.try_into().unwrap()) as usize;
+            u32::from_le_bytes(read_bytes(&data, &mut offset, 4, path)?.try_into().unwrap())
+                as usize;
         let name_bytes = read_bytes(&data, &mut offset, name_len, path)?;
         let name = String::from_utf8(name_bytes.to_vec()).map_err(|error| {
             AssetError::io(
@@ -110,7 +111,8 @@ pub fn load_pak(path: &Path) -> Result<AssetRegistry, AssetError> {
         })?;
 
         let data_len =
-            u64::from_le_bytes(read_bytes(&data, &mut offset, 8, path)?.try_into().unwrap()) as usize;
+            u64::from_le_bytes(read_bytes(&data, &mut offset, 8, path)?.try_into().unwrap())
+                as usize;
         let entry_data = read_bytes(&data, &mut offset, data_len, path)?.to_vec();
 
         raw_entries.push(RawEntry {
@@ -211,10 +213,7 @@ fn decode_material(
     // Layout: base_color_factor [f32; 4] + metallic f32 + roughness f32 + base_tex_idx u32 + normal_tex_idx u32
     let expected_len = 4 * 4 + 4 + 4 + 4 + 4; // 28 bytes
     if data.len() < expected_len {
-        return Err(format!(
-            "material '{name}' data too short: {}",
-            data.len()
-        ));
+        return Err(format!("material '{name}' data too short: {}", data.len()));
     }
 
     let mut off = 0;
@@ -229,7 +228,12 @@ fn decode_material(
         value
     };
 
-    let base_color_factor = [read_f32(&mut off), read_f32(&mut off), read_f32(&mut off), read_f32(&mut off)];
+    let base_color_factor = [
+        read_f32(&mut off),
+        read_f32(&mut off),
+        read_f32(&mut off),
+        read_f32(&mut off),
+    ];
     let metallic_factor = read_f32(&mut off);
     let roughness_factor = read_f32(&mut off);
     let base_tex_idx = read_u32(&mut off);
