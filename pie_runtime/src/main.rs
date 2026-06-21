@@ -8,6 +8,19 @@ use pie_runtime::{
 #[cfg(feature = "rendering")]
 use pie_runtime::{EngineMode, run_client_window};
 
+// M9.3: mimalloc as the global allocator. Gated behind the `mimalloc` feature so
+// it stays toggleable per the engine's "every system must be toggleable /
+// measurable" philosophy. When the feature is off, the system allocator is used
+// (no behavior change, no extra dep). When on, mimalloc replaces the global
+// allocator for the whole process — generally lower fragmentation and better
+// multi-threaded throughput than system malloc, at the cost of a slightly larger
+// binary and a one-time init. Measure with the M9.1 frame-timing overlay and the
+// M9.2 tracing layer before/after toggling to confirm the tradeoff is worth it
+// for your workload.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     init_logging();
 

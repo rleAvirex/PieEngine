@@ -314,8 +314,16 @@ Add the engine-level optimizations that support the project's identity.
   are compiled in. Instrumented `SimulationCore::tick`/`run_phase` and the main loop.
   Verified both configs: `--all-features` (clippy + 118 tests green) and
   `--no-default-features --features rendering` (cargo check green, no tracing dep).
-- ⬜ `mimalloc` global allocator.
-- ⬜ `bumpalo` frame-temporary allocator.
+- ✅ `mimalloc` global allocator: gated behind the `mimalloc` feature (toggleable
+  per philosophy); registered via `#[global_allocator]` in `pie_runtime`'s main.rs.
+  Off by default (system allocator); opt in with `--features mimalloc`. Cost
+  documented in-place.
+- ✅ `bumpalo` frame-temporary allocator: `pie_runtime::frame_alloc::FrameAllocator`
+  (newtype over `bumpalo::Bump`) behind the `frame-alloc` feature. Held by
+  `RuntimeApp`, reset once per frame in the main loop (O(1) pointer rewind,
+  chunks reused). Exposes `alloc()`, `alloc_str_copy()`, `bump()` for direct
+  allocation. 4 new tests. No-op `reset_frame_allocator()` when feature off, so
+  call sites need no cfg.
 - ⬜ Benchmark/regression scene with tracked budgets (CI-runnable).
 
 ## Milestone 10: Advanced rendering path

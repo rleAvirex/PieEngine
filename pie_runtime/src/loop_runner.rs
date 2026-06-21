@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::core::RuntimeApp;
-use crate::profiling::{FrameTiming, PhaseTimer};
 use crate::profile_span;
+use crate::profiling::{FrameTiming, PhaseTimer};
 
 /// Hard ceiling on a single frame's delta time, in seconds.
 ///
@@ -128,6 +128,10 @@ pub fn run_main_loop_with_time_source(
         }
 
         profile_span!("frame");
+
+        // Reset the per-frame bump allocator (M9.4). No-op when the `frame-alloc`
+        // feature is off, so this call site needs no cfg guard.
+        app.reset_frame_allocator();
 
         // Per-frame timing: input phase covers delta polling; sim phase covers
         // the fixed-step accumulator + ticks. Render/present are zero in this

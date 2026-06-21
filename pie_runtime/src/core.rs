@@ -228,6 +228,8 @@ pub struct RuntimeApp {
     running: bool,
     accumulated_time_seconds: f64,
     frame_timing_history: crate::profiling::FrameTimingHistory,
+    #[cfg(feature = "frame-alloc")]
+    frame_allocator: crate::frame_alloc::FrameAllocator,
 }
 
 impl RuntimeApp {
@@ -244,6 +246,8 @@ impl RuntimeApp {
             running: false,
             accumulated_time_seconds: 0.0,
             frame_timing_history: crate::profiling::FrameTimingHistory::default(),
+            #[cfg(feature = "frame-alloc")]
+            frame_allocator: crate::frame_alloc::FrameAllocator::new(),
         })
     }
 
@@ -339,6 +343,34 @@ impl RuntimeApp {
     pub fn frame_timing_history_mut(&mut self) -> &mut crate::profiling::FrameTimingHistory {
         &mut self.frame_timing_history
     }
+
+    /// The per-frame transient bump allocator (M9.4). Only present when the
+    /// `frame-alloc` feature is enabled. Gameplay systems borrow this for
+    /// per-frame scratch (transient render commands, query results) instead of
+    /// hitting the global heap; the main loop resets it once per frame.
+    #[cfg(feature = "frame-alloc")]
+    pub fn frame_allocator(&self) -> &crate::frame_alloc::FrameAllocator {
+        &self.frame_allocator
+    }
+
+    /// Mutable access to the frame allocator, for systems that allocate into it.
+    #[cfg(feature = "frame-alloc")]
+    pub fn frame_allocator_mut(&mut self) -> &mut crate::frame_alloc::FrameAllocator {
+        &mut self.frame_allocator
+    }
+
+    /// Reset the frame allocator for a new frame. Called by the main loop at the
+    /// top of each iteration; also safe to call manually (e.g. in tests). No-op
+    /// when the `frame-alloc` feature is off.
+    #[cfg(feature = "frame-alloc")]
+    pub fn reset_frame_allocator(&mut self) {
+        self.frame_allocator.reset();
+    }
+
+    /// No-op when the `frame-alloc` feature is disabled, so loop code doesn't
+    /// need cfg guards at every call site.
+    #[cfg(not(feature = "frame-alloc"))]
+    pub fn reset_frame_allocator(&mut self) {}
 
     pub fn update(&mut self, delta_seconds: f64) -> u64 {
         if !self.running || delta_seconds <= 0.0 {

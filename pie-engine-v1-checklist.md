@@ -106,8 +106,8 @@ Deliver a realistic v1 that proves the engine structure, shared runtime model, r
 
 - [x] Add frame timing metrics
 - [x] Add simple profiling markers or scoped timing
-- [ ] Add `mimalloc` global allocator
-- [ ] Add frame-temporary allocation strategy with `bumpalo`
+- [x] Add `mimalloc` global allocator
+- [x] Add frame-temporary allocation strategy with `bumpalo`
 - [ ] Add a small benchmark or measurement scene for regressions
 
 ## V1 exit criteria

@@ -13,6 +13,15 @@ cooked-assets = []
 # When enabled, install a subscriber (e.g. `profiling::init_tracy_subscriber()`)
 # to emit spans to Tracy or any tracing-compatible backend.
 profiling = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-tracy"]
+# Use mimalloc as the global allocator instead of the system allocator.
+# Toggleable (off by default) per the "every system must be toggleable" philosophy;
+# binaries opt in via this feature and the #[global_allocator] registration in
+# their main.rs. Cost vs. system malloc is documented in the profiling module.
+mimalloc = ["dep:mimalloc"]
+# Per-frame transient bump allocator (M9.4). Zero-cost when disabled: the
+# FrameAllocator type is a thin newtype around bumpalo::Bump only when this
+# feature is on; when off, the type isn't compiled.
+frame-alloc = ["dep:bumpalo"]
 
 [dependencies]
 glam.workspace = true
@@ -29,3 +38,5 @@ pollster = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 tracing-tracy = { workspace = true, optional = true }
+mimalloc = { workspace = true, optional = true }
+bumpalo = { workspace = true, optional = true }

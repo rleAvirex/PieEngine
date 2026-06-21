@@ -1,6 +1,8 @@
 pub mod assets;
 pub mod components;
 pub mod core;
+#[cfg(feature = "frame-alloc")]
+pub mod frame_alloc;
 pub mod logging;
 pub mod loop_runner;
 pub mod platform;
