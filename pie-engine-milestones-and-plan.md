@@ -277,6 +277,29 @@ Validate the client-server architecture before deeper engine investment.
 - local prediction and server correction both function visibly
 - networking choice is documented with tradeoffs and next steps
 
+### Status
+
+- **In progress.** The networking crate decision is made and the protocol-type
+  foundation is in place; the transport adapter + end-to-end prototype remain.
+- ✅ Crate decision: `renet` (+ `renetcode`), with reasoning recorded in
+  `pie-engine-project-brief.md` → "Networking crate — DECIDED". Chosen over
+  `quinn` (QUIC) because renet is message-oriented + purpose-built for the
+  server-authoritative/prediction model, has toggleable encryption (vs QUIC's
+  mandatory TLS), and a leaner dep tree. Protocol types are transport-agnostic so
+  a future swap is bounded to the adapter.
+- ✅ Protocol types: `pie_runtime::net` module with `Sequence` (wraparound-safe
+  serial-number arithmetic), `InputCommand` (sequence + opaque payload),
+  `Snapshot` (tick + last_acknowledged + opaque state), and `ClientInputBuffer`
+  (the rolling ring of unacknowledged predicted inputs with `discard_acknowledged`
+  + `replay_pending`). 11 tests cover sequence wraparound, the discard/replay
+  flow, and an end-to-end model of the prediction/reconciliation cycle.
+- ⬜ Transport adapter: wire `net` types to `renet` channels (ReliableUnordered
+  for input, Unreliable for snapshots) behind a `net` feature flag.
+- ⬜ Server-authoritative `SimulationCore` driver: server ticks the shared sim
+  from received inputs and broadcasts snapshots; client applies + predicts.
+- ⬜ Remote-player interpolation (~100ms buffer, per the brief).
+- ⬜ Headless server binary path exercised end-to-end with a real client.
+
 ## Milestone 9: Performance systems
 
 ### Goal

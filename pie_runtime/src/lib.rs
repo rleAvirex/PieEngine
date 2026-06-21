@@ -5,6 +5,7 @@ pub mod core;
 pub mod frame_alloc;
 pub mod logging;
 pub mod loop_runner;
+pub mod net;
 pub mod platform;
 pub mod profiling;
 #[cfg(feature = "rendering")]
@@ -27,6 +28,7 @@ pub use loop_runner::{
     MainLoopLimits, StopSignal, TimeSource, WallClock, install_ctrlc_handler, run_main_loop,
     run_main_loop_with_time_source,
 };
+pub use net::{ClientInputBuffer, InputCommand, Sequence, Snapshot};
 pub use profiling::{FramePhase, FrameTiming, FrameTimingHistory, PhaseTimer};
 #[cfg(feature = "rendering")]
 pub use rendering::run_client_window;

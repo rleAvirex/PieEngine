@@ -226,9 +226,34 @@ thread + a handle-based streaming queue, gated behind a feature flag, for open-w
 this (handles are stable indices), so the upgrade path is non-breaking. This decision
 is recorded now so M10's culling/LOD code doesn't assume per-frame asset arrival.
 
-### ❓ Networking crate (quinn vs renet vs custom QUIC/UDP layer) — OPEN
+### ✅ Networking crate — DECIDED: `renet` (+ `renetcode` for the transport layer)
 
-To be resolved by the M8 spike. Decision recorded here once made.
+Resolved by the M8 spike analysis. Reasoning:
+
+1. **The brief's model maps directly onto renet.** The spec is server-authoritative
+   + client-side prediction + snapshot interpolation. `renet` is purpose-built for
+   exactly this; `renetcode` adds the connection handshake, optional encryption,
+   and packet stats the model needs. `quinn` (QUIC) would require building the
+   message-reliability-channel layer on top of QUIC streams — re-implementing what
+   renet already provides.
+2. **Message-oriented > stream-oriented for game netcode.** Game packets (input
+   commands, snapshots) are discrete messages, not byte streams. renet's channel
+   model (ReliableUnordered for input commands, Unreliable for snapshots) maps
+   1:1 onto the brief's model; QUIC's stream multiplexing is the wrong abstraction.
+3. **Toggleable encryption fits the philosophy.** QUIC mandates TLS 1.3 (always-on
+   CPU cost per packet). renetcode uses optional AES-GCM encryption — a LAN/dev
+   build can disable it, consistent with "every cost must be toggleable."
+4. **Knowable, bounded cost.** renet's channels have explicit reliability/ordering
+   semantics with documented overhead. QUIC's stream multiplexing + TLS handshake
+   + congestion control add less-predictable overhead.
+5. **Leaner dependency tree.** renet doesn't pull in rustls/TLS — consistent with
+   the lean-engine identity.
+
+**Tradeoff acknowledged:** renet is less battle-tested than QUIC/HTTP-3.
+**Mitigation:** the M8 prototype validates it end-to-end (two clients + one
+server, prediction, interpolation). The protocol types in `pie_runtime::net` are
+designed against the message-channel abstraction, not renet specifically, so a
+future transport swap is bounded to the transport adapter, not the protocol layer.
 
 ### ❓ Asset format for the cooked `.pak` — OPEN (leaning custom binary)
 
