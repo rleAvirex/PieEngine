@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use hecs::{Entity, World};
 
 use crate::components::{ActiveCamera, Camera, DirectionalLight, Name, Transform, Velocity};
+use crate::profile_span;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineMode {
@@ -188,9 +189,11 @@ impl SimulationCore {
     }
 
     pub fn run_phase(&mut self, phase: SimulationPhase, fixed_timestep_seconds: f64) {
+        profile_span!("sim_phase");
         match phase {
             SimulationPhase::PreUpdate => {}
             SimulationPhase::Update => {
+                profile_span!("sim_update_movement");
                 for (_entity, (transform, velocity)) in
                     self.world.query_mut::<(&mut Transform, &Velocity)>()
                 {
@@ -205,6 +208,7 @@ impl SimulationCore {
     /// over every entity with `Transform` and `Velocity`, then increments
     /// the frame counter.
     pub fn tick(&mut self, fixed_timestep_seconds: f64) {
+        profile_span!("sim_tick");
         for phase in SimulationPhase::ordered() {
             self.run_phase(phase, fixed_timestep_seconds);
         }

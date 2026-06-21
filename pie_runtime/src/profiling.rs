@@ -239,6 +239,90 @@ impl<'a> Drop for PhaseTimer<'a> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Milestone 9.2: feature-gated tracing/tracy profiling spans.
+//
+// This is the deep-dive layer. Unlike the always-on `FrameTiming` metrics above,
+// this layer is gated behind the `profiling` Cargo feature and is **truly
+// zero-cost when disabled**: `profile_span!` expands to nothing (no `tracing`
+// crate pulled in, no span constructed, no code generated). When enabled, it
+// emits `tracing` spans that a subscriber (Tracy via `tracing-tracy`, or any
+// `tracing-subscriber` backend) can capture for a flame-graph view of the frame.
+//
+// Why both layers? The always-on `FrameTiming` answers "how long did each phase
+// take?" with a handful of `Instant::now()` calls — cheap enough to ship, good
+// enough for the editor overlay and benchmark budgets. The tracing layer answers
+// "where *inside* that phase is the time going?" with arbitrary nesting — but
+// costs more (span construction + subscriber overhead), so it's opt-in.
+// ---------------------------------------------------------------------------
+
+/// Re-export of `tracing` so the `profile_span!` macro can reference it via
+/// `$crate::profiling::tracing` without leaking the dependency to downstream
+/// crates. Only present when the `profiling` feature is enabled.
+#[cfg(feature = "profiling")]
+pub use tracing;
+
+/// Install a Tracy subscriber that streams `profile_span!` spans to a running
+/// Tracy profiler instance over a socket. Call this once at startup (before the
+/// main loop) when running under Tracy.
+///
+/// Behind the `profiling` feature so the tracy C client is only linked when
+/// actually requested. Returns immediately if a global subscriber is already
+/// installed (e.g. the host set one up) — `tracing`'s `set_global_default` is
+/// fallible, and we treat an existing subscriber as "host owns profiling."
+#[cfg(feature = "profiling")]
+pub fn init_tracy_subscriber() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let tracy_layer = tracing_tracy::TracyLayer::default();
+
+    // `with_default` would scope the subscriber to a thread; we want process-
+    // global so all `profile_span!` sites (including the main loop) are captured.
+    // `try_init` returns Err if a global subscriber already exists; that's fine.
+    let _ = tracing_subscriber::registry().with(tracy_layer).try_init();
+}
+
+/// No-op when the `profiling` feature is disabled, so call sites don't need cfg.
+#[cfg(not(feature = "profiling"))]
+pub fn init_tracy_subscriber() {}
+
+/// `profile_span!("name")` — instrument a scope with a tracing span.
+///
+/// When the `profiling` feature is **enabled**: expands to a `tracing::span!` at
+/// `TRACE` level and enters it for the enclosing scope. Capture with a Tracy
+/// subscriber (`init_tracy_subscriber()`) or any `tracing-subscriber` backend.
+///
+/// When the `profiling` feature is **disabled** (the default): expands to
+/// nothing. No `tracing` crate is compiled in, no span is constructed, zero
+/// runtime cost. This is the hard guarantee that lets us leave the callsites in
+/// shipping builds without a perf hit.
+///
+/// Use it as a statement at the top of a scope:
+///
+/// ```no_run
+/// # use pie_runtime::profile_span;
+/// fn update(&mut self) {
+///     profile_span!("update");
+///     // ... work ...
+/// }
+/// ```
+#[cfg(feature = "profiling")]
+#[macro_export]
+macro_rules! profile_span {
+    ($name:expr) => {
+        let __pie_profile_span =
+            $crate::profiling::tracing::span!($crate::profiling::tracing::Level::TRACE, $name);
+        let __pie_profile_guard = __pie_profile_span.enter();
+    };
+}
+
+#[cfg(not(feature = "profiling"))]
+#[macro_export]
+macro_rules! profile_span {
+    ($name:expr) => {};
+}
+
 #[cfg(test)]
 mod tests {
     use super::{FramePhase, FrameTiming, FrameTimingHistory, PhaseTimer};
@@ -399,5 +483,30 @@ mod tests {
             present: Duration::from_micros(4),
         };
         assert_eq!(t.as_micros_tuple(), (1, 2, 3, 4));
+    }
+
+    // ----- M9.2: feature-gated tracing layer -----
+
+    #[test]
+    fn profile_span_compiles_and_runs_in_both_configs() {
+        // This test is compiled in both feature configs. With `profiling` off,
+        // the macro expands to nothing and this is a no-op. With `profiling` on,
+        // it constructs and enters a span (captured only if a subscriber is set;
+        // we don't set one here, so the span is cheap and discarded). The point
+        // is to prove the macro is callable from downstream code without cfg.
+        fn instrumented_work() {
+            crate::profile_span!("test_span");
+            // The guard lives for this scope; dropping it on return is fine.
+        }
+        instrumented_work();
+    }
+
+    #[test]
+    fn init_tracy_subscriber_is_callable_in_both_configs() {
+        // With `profiling` off this is a no-op. With `profiling` on it tries to
+        // install a global Tracy subscriber; if one is already installed (e.g. by
+        // another test in the same process) it silently does nothing. We never
+        // assert on the result — this is a "does it link and run" smoke test.
+        crate::profiling::init_tracy_subscriber();
     }
 }

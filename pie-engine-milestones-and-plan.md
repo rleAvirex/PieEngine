@@ -308,7 +308,12 @@ Add the engine-level optimizations that support the project's identity.
   when present). `RuntimeApp` exposes `frame_timing_history()`/`_mut()` for the
   editor overlay and benchmarks. 12 new tests. Cost: a handful of
   `Instant::now()` calls per frame (ns-scale, well below noise floor).
-- ⬜ Scoped profiling markers (tracing/tracy, feature-gated, zero-cost when off).
+- ✅ Scoped profiling markers: `profile_span!` macro (feature-gated behind
+  `profiling`) emits `tracing` spans captured by Tracy via `init_tracy_subscriber()`.
+  **Zero-cost when disabled** — the macro expands to nothing and no `tracing` crates
+  are compiled in. Instrumented `SimulationCore::tick`/`run_phase` and the main loop.
+  Verified both configs: `--all-features` (clippy + 118 tests green) and
+  `--no-default-features --features rendering` (cargo check green, no tracing dep).
 - ⬜ `mimalloc` global allocator.
 - ⬜ `bumpalo` frame-temporary allocator.
 - ⬜ Benchmark/regression scene with tracked budgets (CI-runnable).

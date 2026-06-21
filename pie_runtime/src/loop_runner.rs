@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use crate::core::RuntimeApp;
 use crate::profiling::{FrameTiming, PhaseTimer};
+use crate::profile_span;
 
 /// Hard ceiling on a single frame's delta time, in seconds.
 ///
@@ -125,6 +126,8 @@ pub fn run_main_loop_with_time_source(
         {
             break;
         }
+
+        profile_span!("frame");
 
         // Per-frame timing: input phase covers delta polling; sim phase covers
         // the fixed-step accumulator + ticks. Render/present are zero in this
