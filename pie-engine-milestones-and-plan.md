@@ -299,7 +299,12 @@ Add the engine-level optimizations that support the project's identity.
 
 ### Status
 
-- **In progress — see `pie-engine-v1-checklist.md` section 8 (canonical).**
+- **Complete — see `pie-engine-v1-checklist.md` section 8 (canonical).** All five
+  M9 items are checked off. The performance layer is now: always-on `FrameTiming`
+  metrics (M9.1) + feature-gated zero-cost `tracing`/Tracy spans (M9.2) + opt-in
+  `mimalloc` global allocator (M9.3) + opt-in `bumpalo` frame allocator (M9.4) +
+  a CI-runnable regression benchmark with tracked budgets (M9.5). Every system is
+  toggleable and its cost is documented, per the lean/measurable philosophy.
 - ✅ Frame timing metrics: `pie_runtime::profiling` module with `FrameTiming`
   (input/sim/render/present phases), `FrameTimingHistory` (bounded ring buffer +
   average + max_total), and `PhaseTimer` (RAII guard). Wired into
@@ -324,7 +329,14 @@ Add the engine-level optimizations that support the project's identity.
   chunks reused). Exposes `alloc()`, `alloc_str_copy()`, `bump()` for direct
   allocation. 4 new tests. No-op `reset_frame_allocator()` when feature off, so
   call sites need no cfg.
-- ⬜ Benchmark/regression scene with tracked budgets (CI-runnable).
+- ✅ Benchmark/regression scene: `pie_runtime/tests/bench.rs` — a custom harness
+  (not unstable `cargo bench`) that runs 1000 moving entities for 256 frames,
+  collects `FrameTiming` via the M9.1 layer, and asserts CI budgets
+  (sim p99 < 1ms, sim mean < 500µs in debug). Runs in `cargo test` (loose debug
+  budgets catch O(n²) regressions) and `cargo test --release` (real numbers).
+  Measured debug baseline: p99 ≈ 42µs (budget has ~24× headroom). Includes an
+  `#[ignore]` stress variant (10k entities) for manual release profiling. Budgets
+  are documented constants with a recalibration policy in the file.
 
 ## Milestone 10: Advanced rendering path
 
