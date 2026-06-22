@@ -1,7 +1,7 @@
 use glam::Vec3;
 
 use crate::assets::{AssetRegistry, MaterialAsset, MeshAsset, MeshVertex};
-use crate::components::{ActiveCamera, Camera, MeshRenderer, Name, Transform, Velocity};
+use crate::components::{ActiveCamera, Camera, DirectionalLight, MeshRenderer, Name, Transform, Velocity};
 use crate::core::{BootstrapSceneResult, SimulationCore};
 use crate::rendering::camera::look_at_camera_transform;
 
@@ -42,6 +42,12 @@ pub fn bootstrap_fallback_render_scene(
         Transform::default(),
         Velocity(Vec3::ZERO),
         MeshRenderer { mesh },
+    ));
+
+    core.world_mut().spawn((
+        Name::new("Directional Light"),
+        DirectionalLight::default(),
+        Transform::default(),
     ));
 
     BootstrapSceneResult { active_camera }

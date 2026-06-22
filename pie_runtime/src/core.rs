@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use hecs::{Entity, World};
 
-use crate::components::{ActiveCamera, Camera, DirectionalLight, Name, Transform, Velocity};
+use crate::components::{ActiveCamera, Camera, DirectionalLight, Name, SkyLight, Transform, Velocity};
 use crate::profile_span;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,9 +118,7 @@ impl core::fmt::Debug for SimulationCore {
 
 impl SimulationCore {
     pub fn new() -> Self {
-        let mut simulation = Self::default();
-        simulation.insert_resource(DirectionalLight::default());
-        simulation
+        Self::default()
     }
 
     /// Spawns an entity with a `Transform` and `Velocity`, returning its
@@ -130,12 +128,26 @@ impl SimulationCore {
     }
 
     pub fn bootstrap_scene(&mut self) -> Entity {
-        self.world.spawn((
+        let camera = self.world.spawn((
             Name::new("MainCamera"),
             ActiveCamera,
             Camera::default(),
             Transform::default(),
-        ))
+        ));
+
+        self.world.spawn((
+            Name::new("Directional Light"),
+            DirectionalLight::default(),
+            Transform::default(),
+        ));
+
+        self.world.spawn((
+            Name::new("Sky Light"),
+            SkyLight::default(),
+            Transform::default(),
+        ));
+
+        camera
     }
 
     pub fn bootstrap_scene_with_summary(&mut self) -> BootstrapSceneResult {
@@ -641,14 +653,16 @@ mod tests {
     }
 
     #[test]
-    fn simulation_core_starts_with_default_directional_light() {
-        let core = SimulationCore::new();
+    fn bootstrap_scene_spawns_directional_light_entity() {
+        let mut core = SimulationCore::new();
+        core.bootstrap_scene();
 
-        let light = core
-            .resource::<DirectionalLight>()
-            .expect("default directional light should exist");
-
-        assert!((light.direction.length() - 1.0).abs() < 1e-6);
+        let mut found = false;
+        for (_, light) in core.world().query::<&DirectionalLight>().iter() {
+            assert!((light.direction.length() - 1.0).abs() < 1e-6);
+            found = true;
+        }
+        assert!(found, "bootstrap_scene should spawn a DirectionalLight entity");
     }
 
     #[test]

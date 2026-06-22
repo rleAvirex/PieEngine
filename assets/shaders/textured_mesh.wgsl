@@ -39,6 +39,13 @@ var normal_texture: texture_2d<f32>;
 @group(3) @binding(3)
 var base_color_sampler: sampler;
 
+// Sky light cubemap — captured from the Sky Atmosphere for indirect lighting.
+// Bound in the light group (group 2) alongside the directional light uniform.
+@group(2) @binding(1)
+var sky_light_cubemap: texture_cube<f32>;
+@group(2) @binding(2)
+var sky_light_sampler: sampler;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -161,7 +168,33 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let diffuse = k_d * base_color.rgb / 3.14159265;
 
     let light_radiance = light.color.rgb * light.color.a;
-    let ambient = base_color.rgb * 0.03;
+
+    // ── Sky Light IBL ──────────────────────────────────────────────────────
+    // Sample the sky light cubemap for diffuse indirect lighting.
+    // The cubemap is captured from the Sky Atmosphere, so it contains the
+    // actual sky color (blue zenith, warm horizon, sun disk, etc.).
+    //
+    // For diffuse: sample in the surface normal direction (Lambertian).
+    // For specular: sample in the reflection direction (mirror).
+    // Since we only have one mip level, we use the same cubemap for both
+    // — roughness controls the blend between diffuse and specular IBL.
+
+    // Diffuse IBL: sample cubemap in normal direction
+    let sky_diffuse = textureSample(sky_light_cubemap, sky_light_sampler, normal).rgb;
+
+    // Specular IBL: sample cubemap in reflection direction
+    let reflect_dir = reflect(-view_direction, normal);
+    let sky_specular = textureSample(sky_light_cubemap, sky_light_sampler, reflect_dir).rgb;
+
+    // Diffuse ambient: sky light * base color * (1 - metallic) / PI
+    // Multiplier boosted because the sky cubemap values are low-res and dim
+    let ambient_diffuse = sky_diffuse * base_color.rgb * (1.0 - metallic) / 3.14159265 * 3.0;
+
+    // Specular ambient: sky light * Fresnel * roughness blend
+    let specular_ibl = sky_specular * f * mix(0.5, 1.0, roughness) * 2.0;
+
+    let ambient = (ambient_diffuse + specular_ibl) * 0.8;
+
     let lighting = ambient + (diffuse + specular) * light_radiance * n_dot_l;
 
     // ACES tone map HDR → LDR, then output in linear space.

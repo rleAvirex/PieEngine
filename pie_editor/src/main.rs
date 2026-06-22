@@ -1,10 +1,12 @@
 //! Pie Editor — a visual scene editor built on the PieEngine runtime.
 
+mod dock_layout;
 mod fly_camera;
 mod gizmo;
 mod picking;
 mod theme;
 mod ui;
+mod ui_components;
 mod viewport_renderer;
 
 use std::env;
@@ -20,7 +22,8 @@ use egui_winit::State as EguiWinitState;
 use glam::{Vec2, Vec3};
 use hecs::Entity;
 use pie_runtime::assets::{AssetRegistry, load_fbx_meshes, load_gltf_scene, spawn_imported_scene};
-use pie_runtime::components::{Camera, Transform};
+use pie_runtime::components::{Camera, DirectionalLight, Name, SkyLight, Transform};
+use ui::SpawnableEntity;
 use pie_runtime::core::RuntimeApp;
 use pie_runtime::init_logging;
 use pie_runtime::rendering::camera_view_proj;
@@ -38,6 +41,7 @@ use gizmo::{
 use picking::{
     PickableBounds, ray_aabb_hit, screen_ray_from_ndc, viewport_ndc_from_rect, world_aabb,
 };
+use dock_layout::DockState;
 use ui::{EditorCommands, EditorSceneInfo, EditorUiParams, build_editor_ui};
 use viewport_renderer::{EditorViewportRenderer, EditorViewportTexture};
 
@@ -149,6 +153,13 @@ impl EditorScene {
         match load_gltf_scene(&scene_path, &mut registry) {
             Ok(imported) => {
                 spawn_imported_scene(runtime.simulation_mut(), &imported);
+                // Spawn a default directional light so the scene is always lit
+                // and the light appears as an editable object in the outliner.
+                runtime.simulation_mut().world_mut().spawn((
+                    pie_runtime::components::Name::new("Directional Light"),
+                    pie_runtime::components::DirectionalLight::default(),
+                    pie_runtime::components::Transform::default(),
+                ));
             }
             Err(error) => {
                 eprintln!(
@@ -236,18 +247,13 @@ struct EditorApp {
     gizmo_state: GizmoState,
     hovered_axis: Option<Axis>,
     hovered_center: bool,
+    dock_state: DockState,
 }
 
 impl EditorApp {
     fn new(mut runtime: RuntimeApp, launch: EditorLaunch) -> Self {
         let scene = EditorScene::load(&mut runtime);
-        let selected_entity = runtime
-            .simulation()
-            .world()
-            .query::<&Transform>()
-            .iter()
-            .map(|(entity, _)| entity)
-            .next();
+        let selected_entity = None;
 
         if let Some(step_count) = launch.step_count {
             for _ in 0..step_count {
@@ -281,6 +287,7 @@ impl EditorApp {
             gizmo_state: GizmoState::default(),
             hovered_axis: None,
             hovered_center: false,
+            dock_state: DockState::default(),
         }
     }
 
@@ -336,16 +343,45 @@ impl EditorApp {
             Self::init_camera_and_pickables(&self.runtime, &self.scene);
         self.editor_camera = editor_camera;
         self.pickables = pickables;
-        self.selected_entity = self
-            .runtime
-            .simulation()
-            .world()
-            .query::<&Transform>()
-            .iter()
-            .map(|(entity, _)| entity)
-            .next();
+        self.selected_entity = None;
         self.runtime.pause();
         self.request_redraw();
+    }
+
+    /// Spawn a new entity of the given type into the simulation world.
+    fn spawn_entity(runtime: &mut RuntimeApp, entity_type: SpawnableEntity) -> Entity {
+        let world = runtime.simulation_mut().world_mut();
+
+        // Default spawn position — at the origin. Could be extended to spawn
+        // at the camera position or on a surface under the cursor.
+        let transform = Transform::default();
+
+        match entity_type {
+            SpawnableEntity::Empty => {
+                world.spawn((Name::new("Empty"), transform))
+            }
+            SpawnableEntity::Camera => {
+                world.spawn((
+                    Name::new("Camera"),
+                    Camera::default(),
+                    transform,
+                ))
+            }
+            SpawnableEntity::DirectionalLight => {
+                world.spawn((
+                    Name::new("Directional Light"),
+                    DirectionalLight::default(),
+                    transform,
+                ))
+            }
+            SpawnableEntity::SkyLight => {
+                world.spawn((
+                    Name::new("Sky Light"),
+                    SkyLight::default(),
+                    transform,
+                ))
+            }
+        }
     }
 
     fn ensure_viewport_renderer(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -744,10 +780,16 @@ impl ApplicationHandler for EditorApp {
                         smoothed_delta,
                         cam_pos,
                         cam_speed,
+                        dock: &mut self.dock_state,
                     });
                 });
                 self.selected_entity = selected_entity;
                 self.viewport_hovered = commands.viewport_hovered;
+
+                // Apply dock layout commands
+                for cmd in self.dock_state.drain_cmds() {
+                    self.dock_state.apply_cmd(cmd);
+                }
 
                 if let Some(egui_state) = self.egui_state.as_mut() {
                     egui_state.handle_platform_output(window.as_ref(), full_output.platform_output);
@@ -1006,7 +1048,10 @@ impl ApplicationHandler for EditorApp {
                         Some(PickResult::GizmoAxis(_)) | Some(PickResult::GizmoCenter) => {
                             // Handled above via drag-start.
                         }
-                        None => {}
+                        None => {
+                            self.selected_entity = None;
+                            needs_redraw = true;
+                        }
                     }
                 }
 
@@ -1034,6 +1079,12 @@ impl ApplicationHandler for EditorApp {
 
                 if commands.reload_scene {
                     self.load_scene();
+                    needs_redraw = true;
+                }
+
+                if let Some(entity_type) = commands.spawn_entity {
+                    let entity = Self::spawn_entity(&mut self.runtime, entity_type);
+                    eprintln!("[editor] Spawned {:?} entity: {:?}", entity_type, entity);
                     needs_redraw = true;
                 }
 

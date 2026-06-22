@@ -69,14 +69,19 @@ impl Camera {
 
 /// A single directional light used for the baseline lit renderer.
 ///
-/// The light is stored as a simulation resource instead of an entity so the
-/// renderer can treat it as global scene state and later expose it in the
-/// editor UI.
+/// When `atmosphere_sun_light` is enabled, this light drives the sun
+/// direction in the Sky Atmosphere component (UE5-style). The optional
+/// `sun_light_index` selects which atmospheric light slot this occupies
+/// (0 = primary sun, 1 = secondary e.g. moon).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DirectionalLight {
     pub direction: Vec3,
     pub color: Vec3,
     pub intensity: f32,
+    /// Whether this light acts as the atmospheric sun for Sky Atmosphere.
+    pub atmosphere_sun_light: bool,
+    /// Index into the atmospheric light array (0 or 1).
+    pub sun_light_index: u32,
 }
 
 impl DirectionalLight {
@@ -85,13 +90,52 @@ impl DirectionalLight {
             direction: direction.normalize_or_zero(),
             color,
             intensity,
+            atmosphere_sun_light: false,
+            sun_light_index: 0,
+        }
+    }
+
+    /// Create a directional light that also acts as the atmospheric sun.
+    pub fn new_sun(direction: Vec3, color: Vec3, intensity: f32, index: u32) -> Self {
+        Self {
+            direction: direction.normalize_or_zero(),
+            color,
+            intensity,
+            atmosphere_sun_light: true,
+            sun_light_index: index,
         }
     }
 }
 
 impl Default for DirectionalLight {
     fn default() -> Self {
-        Self::new(Vec3::new(-0.35, -1.0, -0.2), Vec3::splat(1.0), 3.5)
+        Self::new_sun(Vec3::new(-0.35, -1.0, -0.2), Vec3::splat(1.0), 3.5, 0)
+    }
+}
+
+/// Sky Light component — captures the sky atmosphere and applies it as
+/// indirect (ambient) lighting to objects, similar to UE5's Sky Light actor.
+///
+/// The viewport renderer manages the actual cubemap capture; this component
+/// stores the user-facing settings.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkyLight {
+    /// Overall intensity multiplier for the sky light contribution.
+    pub intensity: f32,
+    /// Whether to capture the sky in real-time each frame (dynamic time-of-day).
+    /// When false, the cubemap is only captured on demand (recapture).
+    pub real_time_capture: bool,
+    /// Resolution of the captured cubemap (per-face). Lower = faster.
+    pub capture_resolution: u32,
+}
+
+impl Default for SkyLight {
+    fn default() -> Self {
+        Self {
+            intensity: 1.0,
+            real_time_capture: true,
+            capture_resolution: 64,
+        }
     }
 }
 
@@ -172,5 +216,21 @@ mod tests {
         assert!((light.direction.length() - 1.0).abs() < 1e-6);
         assert_eq!(light.color, Vec3::ONE);
         assert_eq!(light.intensity, 2.0);
+        assert!(!light.atmosphere_sun_light);
+    }
+
+    #[test]
+    fn directional_light_sun_variant() {
+        let light = DirectionalLight::new_sun(Vec3::new(0.0, -1.0, 0.0), Vec3::ONE, 5.0, 0);
+        assert!(light.atmosphere_sun_light);
+        assert_eq!(light.sun_light_index, 0);
+    }
+
+    #[test]
+    fn sky_light_default() {
+        let sl = SkyLight::default();
+        assert_eq!(sl.intensity, 1.0);
+        assert!(sl.real_time_capture);
+        assert_eq!(sl.capture_resolution, 64);
     }
 }

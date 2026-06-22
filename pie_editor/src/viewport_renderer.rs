@@ -1,6 +1,30 @@
 //! Editor viewport renderer — GPU pipeline, mesh/texture/material upload, and rendering.
 
 use std::path::Path;
+
+/// Quality level for the sky atmosphere ray-marching.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkyQuality {
+    /// Sky atmosphere disabled — flat clear color only.
+    Off,
+    /// Low quality: 8 ray steps, 4 sun steps. Fast, visible banding.
+    Low,
+    /// Medium quality: 16 ray steps, 8 sun steps. Good balance.
+    Medium,
+    /// High quality: 32 ray steps, 16 sun steps. Smooth, expensive.
+    High,
+}
+
+impl SkyQuality {
+    pub fn sample_counts(self) -> (u32, u32) {
+        match self {
+            SkyQuality::Off => (0, 0),
+            SkyQuality::Low => (8, 4),
+            SkyQuality::Medium => (16, 8),
+            SkyQuality::High => (32, 16),
+        }
+    }
+}
 use std::sync::Arc;
 
 use egui::TextureId;
@@ -9,7 +33,7 @@ use hecs::Entity;
 use pie_runtime::assets::{
     AssetRegistry, MaterialAsset, MaterialHandle, MeshAsset, MeshVertex, load_shader_named,
 };
-use pie_runtime::components::{Camera, DirectionalLight, Transform};
+use pie_runtime::components::{Camera, DirectionalLight, SkyLight, Transform};
 use pie_runtime::rendering::{CameraUniform, camera_view_proj};
 use wgpu::util::DeviceExt;
 
@@ -125,6 +149,24 @@ struct EditorLightUniform {
     color: [f32; 4],
 }
 
+/// Sky atmosphere parameters — must match sky_atmosphere.wgsl SkyParams layout.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct EditorSkyUniform {
+    sun_direction: [f32; 4],
+    sun_intensity: f32,
+    rayleigh_coefficient: f32,
+    mie_coefficient: f32,
+    rayleigh_scale_height: f32,
+    mie_scale_height: f32,
+    mie_directionality: f32,
+    planet_radius: f32,
+    atmosphere_radius: f32,
+    ray_samples: u32,
+    mie_samples: u32,
+    _padding: [u32; 2],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct LineCameraUniform {
@@ -195,6 +237,24 @@ pub struct EditorViewportRenderer {
     fbx_gizmo_move: Option<(Vec<pie_runtime::assets::MeshVertex>, Vec<u32>)>,
     /// FBX-loaded gizmo mesh data for the scale/sphere gizmo.
     fbx_gizmo_sphere: Option<(Vec<pie_runtime::assets::MeshVertex>, Vec<u32>)>,
+    // -- Sky atmosphere --
+    sky_pipeline: wgpu::RenderPipeline,
+    sky_uniform_buffer: wgpu::Buffer,
+    sky_bind_group: wgpu::BindGroup,
+    /// Whether the sky atmosphere is enabled.
+    sky_enabled: bool,
+    /// Current sky quality level.
+    sky_quality: SkyQuality,
+    // -- Sky Light (cubemap capture) --
+    /// Cubemap texture capturing the sky for indirect lighting.
+    sky_light_cubemap: wgpu::Texture,
+    sky_light_cubemap_view: wgpu::TextureView,
+    /// Sampler for the sky light cubemap (trilinear for mip interpolation).
+    sky_light_sampler: wgpu::Sampler,
+    /// Whether the sky light cubemap needs to be recaptured this frame.
+    sky_light_dirty: bool,
+    /// Frame counter used to throttle real-time captures (capture every N frames).
+    sky_light_frame_counter: u32,
 }
 
 impl EditorViewportRenderer {
@@ -297,16 +357,37 @@ impl EditorViewportRenderer {
                 .as_ref()
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("editor viewport light bind group layout"),
-                    entries: &[wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
+                    entries: &[
+                        // binding 0: directional light uniform
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
                         },
-                        count: None,
-                    }],
+                        // binding 1: sky light cubemap
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::Cube,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        // binding 2: sky light sampler
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
                 });
 
         let pipeline_layout =
@@ -314,7 +395,12 @@ impl EditorViewportRenderer {
                 .as_ref()
                 .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("editor viewport pipeline layout"),
-                    bind_group_layouts: &[&camera_bgl, &model_bgl, &light_bgl, &texture_bgl],
+                    bind_group_layouts: &[
+                        &camera_bgl,
+                        &model_bgl,
+                        &light_bgl,
+                        &texture_bgl,
+                    ],
                     push_constant_ranges: &[],
                 });
 
@@ -428,17 +514,6 @@ impl EditorViewportRenderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let light_bind_group = device
-            .as_ref()
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("editor viewport light bind group"),
-                layout: &light_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: light_buffer.as_entire_binding(),
-                }],
-            });
-
         let sampler = device.as_ref().create_sampler(&wgpu::SamplerDescriptor {
             label: Some("editor viewport sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -871,6 +946,178 @@ impl EditorViewportRenderer {
                     cache: None,
                 });
 
+        // -- Sky atmosphere pipeline --
+        let sky_shader_source =
+            load_shader_named(assets_root, "sky_atmosphere").map_err(|e| e.to_string())?;
+        let sky_shader = device
+            .as_ref()
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("editor sky atmosphere shader"),
+                source: wgpu::ShaderSource::Wgsl(sky_shader_source.into()),
+            });
+
+        let sky_bgl =
+            device
+                .as_ref()
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("sky bind group layout"),
+                    entries: &[
+                        // binding 0: camera uniform (reuse camera buffer)
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        // binding 1: sky params uniform
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+
+        let sky_pipeline_layout =
+            device
+                .as_ref()
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("sky pipeline layout"),
+                    bind_group_layouts: &[&sky_bgl],
+                    push_constant_ranges: &[],
+                });
+
+        let sky_pipeline =
+            device
+                .as_ref()
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("sky atmosphere pipeline"),
+                    layout: Some(&sky_pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &sky_shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &sky_shader,
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: hdr_format,
+                            blend: Some(wgpu::BlendState::REPLACE),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: None,
+                        unclipped_depth: false,
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        conservative: false,
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: DEPTH_FORMAT,
+                        depth_write_enabled: false,
+                        depth_compare: wgpu::CompareFunction::Always,
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview: None,
+                    cache: None,
+                });
+
+        let sky_uniform_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sky uniform buffer"),
+            size: std::mem::size_of::<EditorSkyUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let sky_bind_group = device
+            .as_ref()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("sky bind group"),
+                layout: &sky_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: camera_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: sky_uniform_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+
+        // -- Sky Light cubemap --
+        // Create a cubemap texture for capturing the sky atmosphere.
+        // Resolution 64x64 per face is sufficient for diffuse irradiance.
+        let sky_light_res = 64u32;
+        let sky_light_cubemap = device.as_ref().create_texture(&wgpu::TextureDescriptor {
+            label: Some("sky light cubemap"),
+            size: wgpu::Extent3d {
+                width: sky_light_res,
+                height: sky_light_res,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: hdr_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let sky_light_cubemap_view = sky_light_cubemap.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("sky light cubemap view"),
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+        let sky_light_sampler = device.as_ref().create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("sky light sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        // Create the light bind group with the actual sky light cubemap.
+        let light_bind_group = device
+            .as_ref()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("editor viewport light bind group"),
+                layout: &light_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: light_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&sky_light_cubemap_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&sky_light_sampler),
+                    },
+                ],
+            });
+
         Ok(Self {
             device,
             queue,
@@ -909,6 +1156,16 @@ impl EditorViewportRenderer {
             gizmo_vertex_capacity: GIZMO_MAX_VERTICES,
             fbx_gizmo_move: None,
             fbx_gizmo_sphere: None,
+            sky_pipeline,
+            sky_uniform_buffer,
+            sky_bind_group,
+            sky_enabled: true,
+            sky_quality: SkyQuality::Medium,
+            sky_light_cubemap,
+            sky_light_cubemap_view,
+            sky_light_sampler,
+            sky_light_dirty: true,
+            sky_light_frame_counter: 0,
         })
     }
 
@@ -981,6 +1238,14 @@ impl EditorViewportRenderer {
                 self.fbx_gizmo_sphere.as_ref().unwrap().1.len()
             );
         }
+    }
+
+    /// Set sky atmosphere quality level.
+    pub fn set_sky_quality(&mut self, quality: SkyQuality) {
+        self.sky_enabled = quality != SkyQuality::Off;
+        // The actual sample counts are applied in render_to_view via the uniform.
+        // We store the quality and apply it when writing the uniform.
+        self.sky_quality = quality;
     }
 
     pub fn load_scene(
@@ -1180,8 +1445,11 @@ impl EditorViewportRenderer {
         );
 
         let dl = simulation
-            .resource::<DirectionalLight>()
-            .copied()
+            .world()
+            .query::<&DirectionalLight>()
+            .iter()
+            .map(|(_, light)| *light)
+            .next()
             .unwrap_or_default();
         self.queue.as_ref().write_buffer(
             &self.light_buffer,
@@ -1189,6 +1457,32 @@ impl EditorViewportRenderer {
             bytemuck::bytes_of(&EditorLightUniform {
                 direction: [dl.direction.x, dl.direction.y, dl.direction.z, 0.0],
                 color: [dl.color.x, dl.color.y, dl.color.z, dl.intensity],
+            }),
+        );
+
+        // Update sky atmosphere uniform from directional light
+        let sun_dir = dl.direction;
+        let (ray_samples, mie_samples) = self.sky_quality.sample_counts();
+        self.queue.as_ref().write_buffer(
+            &self.sky_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&EditorSkyUniform {
+                sun_direction: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
+                sun_intensity: dl.intensity.max(1.0),
+                // Scattering multipliers — tuned for visual impact rather than
+                // physical accuracy. The base coefficients in the shader are
+                // ~5.5e-6 (Rayleigh) and ~2e-5 (Mie), so these multipliers
+                // bring the values into a visible range.
+                rayleigh_coefficient: 800.0,
+                mie_coefficient: 400.0,
+                rayleigh_scale_height: 8.0,
+                mie_scale_height: 1.2,
+                mie_directionality: 0.8,
+                planet_radius: 6360.0,
+                atmosphere_radius: 6460.0,
+                ray_samples,
+                mie_samples,
+                _padding: [0; 2],
             }),
         );
 
@@ -1208,10 +1502,168 @@ impl EditorViewportRenderer {
             });
 
         // ====================================================================
+        // Pass -1: Capture sky light cubemap (6 faces)
+        // ====================================================================
+        // Renders the sky atmosphere into each face of the cubemap for use as
+        // indirect lighting in the PBR shader. Only captures when the sky
+        // light is dirty (first frame or real-time capture enabled).
+        {
+            let sky_light = simulation
+                .world()
+                .query::<&SkyLight>()
+                .iter()
+                .map(|(_, sl)| *sl)
+                .next()
+                .unwrap_or_default();
+
+            let should_capture = self.sky_light_dirty
+                || (sky_light.real_time_capture && self.sky_light_frame_counter == 0);
+
+            if should_capture && self.sky_enabled {
+                // Throttle real-time captures to every 4th frame for performance.
+                self.sky_light_frame_counter = (self.sky_light_frame_counter + 1) % 4;
+
+                // Cubemap face directions: +X, -X, +Y, -Y, +Z, -Z
+                let face_rotations: [glam::Quat; 6] = [
+                    glam::Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),  // +X
+                    glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),   // -X
+                    glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),   // +Y
+                    glam::Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),  // -Y
+                    glam::Quat::from_rotation_y(std::f32::consts::PI),          // +Z
+                    glam::Quat::IDENTITY,                                       // -Z
+                ];
+
+                let cam_pos = simulation
+                    .active_camera()
+                    .and_then(|e| simulation.world().get::<&Transform>(e).ok())
+                    .map(|t| t.translation)
+                    .unwrap_or_default();
+
+                let res = sky_light.capture_resolution.max(1);
+                let aspect = 1.0f32; // square faces
+                let fov = std::f32::consts::FRAC_PI_2; // 90 degrees for cubemap faces
+
+                // Create a small depth texture for the cubemap capture passes.
+                let cube_depth = self.device.as_ref().create_texture(&wgpu::TextureDescriptor {
+                    label: Some("sky light cubemap depth"),
+                    size: wgpu::Extent3d {
+                        width: res,
+                        height: res,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: DEPTH_FORMAT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+                let cube_depth_view = cube_depth.create_view(&wgpu::TextureViewDescriptor::default());
+
+                for face in 0..6 {
+                    // Build a view matrix for this cubemap face.
+                    // We use a simple approach: position at camera, look in face direction.
+                    let face_rot = face_rotations[face];
+                    let forward = face_rot * glam::Vec3::NEG_Z;
+                    let up = face_rot * glam::Vec3::Y;
+                    let view = Mat4::look_at_rh(cam_pos, cam_pos + forward, up);
+                    let proj = Mat4::perspective_rh(fov, aspect, 0.1, 10000.0);
+                    let view_proj = proj * view;
+
+                    // Update camera buffer with this face's view-projection.
+                    self.queue.as_ref().write_buffer(
+                        &self.camera_buffer,
+                        0,
+                        bytemuck::bytes_of(&CameraUniform::from_view_proj(
+                            view_proj,
+                            cam_pos,
+                            aspect,
+                            fov,
+                        )),
+                    );
+
+                    // Create a texture view for this specific cubemap face.
+                    let face_view = self.sky_light_cubemap.create_view(
+                        &wgpu::TextureViewDescriptor {
+                            label: Some("sky light cubemap face"),
+                            dimension: Some(wgpu::TextureViewDimension::D2),
+                            base_array_layer: face as u32,
+                            array_layer_count: Some(1),
+                            ..Default::default()
+                        },
+                    );
+
+                    let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("sky light cubemap capture"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &face_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &cube_depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    rp.set_pipeline(&self.sky_pipeline);
+                    rp.set_bind_group(0, &self.sky_bind_group, &[]);
+                    rp.draw(0..3, 0..1);
+                }
+            }
+
+            self.sky_light_dirty = false;
+        }
+
+        // ====================================================================
+        // Pass 0: Sky Atmosphere → HDR render target
+        // ====================================================================
+        // Renders the sky dome via ray-marching Rayleigh/Mie scattering.
+        // Outputs linear HDR values. Runs before the scene so depth test
+        // ensures geometry occludes the sky.
+        if self.sky_enabled {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("editor sky atmosphere pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.hdr_texture_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(theme::VIEWPORT_CLEAR),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.sky_pipeline);
+            rp.set_bind_group(0, &self.sky_bind_group, &[]);
+            rp.draw(0..3, 0..1);
+        }
+
+        // ====================================================================
         // Pass 1: Scene → HDR render target (Rgba16Float, linear space)
         // ====================================================================
         // PBR shader outputs linear HDR values. No gamma correction in shader
         // — that's handled by the sRGB swapchain in pass 2.
+        // NOTE: LoadOp::Load preserves the sky from Pass 0 — geometry occludes
+        // the sky via the depth buffer, but the sky shows through where there's
+        // no geometry.
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("editor scene HDR pass"),
@@ -1219,7 +1671,7 @@ impl EditorViewportRenderer {
                     view: &self.hdr_texture_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(theme::VIEWPORT_CLEAR),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],

@@ -578,8 +578,11 @@ impl Renderer {
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
 
         let directional_light = simulation
-            .resource::<DirectionalLight>()
-            .copied()
+            .world()
+            .query::<&DirectionalLight>()
+            .iter()
+            .map(|(_, light)| *light)
+            .next()
             .unwrap_or_default();
         let light_uniform = LightUniform {
             direction: [
