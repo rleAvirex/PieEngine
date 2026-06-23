@@ -247,9 +247,10 @@ fn compute_sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
     // inscatter → black). The editor camera often looks down at the scene,
     // so many view rays point below the horizon. Without this fallback, the
     // entire viewport would be black whenever the camera is tilted down.
-    // Blend in a simple gradient based on the ray's angle from the camera's
-    // up vector, plus a sun glow.
-    let up = normalize(camera.world_up.xyz);
+    // Blend in a simple gradient based on the ray's angle from WORLD up
+    // (not the camera's up vector — that would tilt the horizon as the
+    // camera rotates), plus a sun glow.
+    let up = vec3<f32>(0.0, 1.0, 0.0);
     let up_dot = dot(ray_dir, up);
     let horizon_color = vec3<f32>(0.45, 0.55, 0.75);
     let zenith_color = vec3<f32>(0.15, 0.30, 0.60);

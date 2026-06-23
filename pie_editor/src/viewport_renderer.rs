@@ -1640,7 +1640,12 @@ impl EditorViewportRenderer {
                     .map(|t| t.translation)
                     .unwrap_or_default();
 
-                let res = sky_light.capture_resolution.max(1);
+                // Use the cubemap texture's actual size for the depth attachment
+                // (NOT sky_light.capture_resolution, which may differ from the
+                // cubemap's hardcoded 64×64 construction size and cause a
+                // wgpu validation error: "Attachments have differing sizes").
+                let cubemap_size = self.sky_light_cubemap.size();
+                let res = cubemap_size.width.max(1);
                 let aspect = 1.0f32; // square faces
                 let fov = std::f32::consts::FRAC_PI_2; // 90 degrees for cubemap faces
 

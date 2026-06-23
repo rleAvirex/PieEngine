@@ -109,7 +109,7 @@ impl DirectionalLight {
 
 impl Default for DirectionalLight {
     fn default() -> Self {
-        Self::new_sun(Vec3::new(-0.35, -1.0, -0.2), Vec3::splat(1.0), 3.5, 0)
+        Self::new_sun(Vec3::new(-0.35, -1.0, -0.2), Vec3::splat(1.0), 40.0, 0)
     }
 }
 
