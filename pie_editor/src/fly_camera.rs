@@ -71,13 +71,12 @@ impl EditorCamera {
     ///
     /// Computed as `forward × world_up` (horizontal forward), which is the
     /// correct right-handed camera right vector. Always horizontal (Y=0).
-    /// Note: this DIFFERS from the old `Ry(yaw) * X` formula, which used a
-    /// left-handed right vector and caused roll.
     pub fn right_xz(&self) -> Vec3 {
         let cos_pitch = self.pitch.cos();
         // Horizontal forward (Y=0), used only for the right-vector derivation.
+        // Matches Ry(yaw) * Rx(-pitch) * (-Z) with pitch=0 for the XZ projection.
         let forward_xz = Vec3::new(
-            self.yaw.sin() * cos_pitch,
+            -self.yaw.sin() * cos_pitch,
             0.0,
             -self.yaw.cos() * cos_pitch,
         ).normalize_or_zero();
@@ -109,8 +108,9 @@ impl EditorCamera {
             return;
         }
         let cos_pitch = self.pitch.cos();
+        // Forward matches into_transform(): Ry(yaw)*Rx(-pitch)*(-Z).
         let forward_3d = Vec3::new(
-            self.yaw.sin() * cos_pitch,
+            -self.yaw.sin() * cos_pitch,
             self.pitch.sin(),
             -self.yaw.cos() * cos_pitch,
         ).normalize_or_zero();
@@ -143,8 +143,11 @@ impl EditorCamera {
     pub fn into_transform(self) -> Transform {
         let cos_pitch = self.pitch.cos();
         // Forward from yaw/pitch. With yaw=0, pitch=0: forward = -Z.
+        // Matches Ry(yaw) * Rx(-pitch) * (-Z):
+        //   Rx(-pitch) * (-Z) = (0, sin(pitch), -cos(pitch))
+        //   Ry(yaw) * that    = (-sin(yaw)cos(pitch), sin(pitch), -cos(yaw)cos(pitch))
         let forward = Vec3::new(
-            self.yaw.sin() * cos_pitch,
+            -self.yaw.sin() * cos_pitch,
             self.pitch.sin(),
             -self.yaw.cos() * cos_pitch,
         ).normalize_or_zero();
