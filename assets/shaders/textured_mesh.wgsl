@@ -174,14 +174,19 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let light_radiance = light.color.rgb * light.color.a;
 
     // ── Sky Light IBL ──────────────────────────────────────────────────────
-    // Sample the sky light cubemap for diffuse indirect lighting.
-    // The cubemap is captured from the Sky Atmosphere, so it contains the
-    // actual sky color (blue zenith, warm horizon, sun disk, etc.).
+    // Sample the sky light cubemap for indirect lighting.
     //
-    // For diffuse: sample in the surface normal direction (Lambertian).
-    // For specular: sample in the reflection direction (mirror).
-    // Since we only have one mip level, we use the same cubemap for both
-    // — roughness controls the blend between diffuse and specular IBL.
+    // Diffuse IBL: irradiance from the sky hitting the surface. Sample the
+    // cubemap in the surface normal direction. For a proper irradiance map
+    // we'd convolve over the hemisphere, but with a single-mip radiance
+    // cubemap we approximate by sampling in the normal direction and
+    // multiplying by a constant ambient factor.
+    //
+    // Specular IBL: reflection of the sky off the surface. Sample in the
+    // reflection direction, scaled by roughness — smooth surfaces (low
+    // roughness) get sharp reflections, rough surfaces get dim reflections.
+    // Without mip levels we can't blur the reflection, so we just attenuate
+    // by (1 - roughness).
 
     // Diffuse IBL: sample cubemap in normal direction
     let sky_diffuse = textureSample(sky_light_cubemap, sky_light_sampler, normal).rgb;
@@ -190,16 +195,22 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let reflect_dir = reflect(-view_direction, normal);
     let sky_specular = textureSample(sky_light_cubemap, sky_light_sampler, reflect_dir).rgb;
 
-    // Diffuse ambient: sky light * base color * (1 - metallic) / PI.
-    // Multiplier boosted (10x) because the sky cubemap values are linear HDR
-    // and typically dim — without the boost, shadowed surfaces are too dark.
-    let ambient_diffuse = sky_diffuse * base_color.rgb * (1.0 - metallic) / 3.14159265 * 10.0;
+    // Diffuse ambient: irradiance * base_color * (1 - metallic).
+    // No /PI here — this is ambient incoming light, not a BRDF response.
+    // The 3.0 multiplier compensates for the cubemap being a single-sample
+    // approximation of the hemisphere irradiance (a proper irradiance
+    // convolution would be ~PI times brighter than a single radiance sample).
+    let ambient_diffuse = sky_diffuse * base_color.rgb * (1.0 - metallic) * 3.0;
 
-    // Specular ambient: sky light * Fresnel * roughness blend.
-    // Also boosted for visibility.
-    let specular_ibl = sky_specular * f * mix(0.5, 1.0, roughness) * 5.0;
+    // Specular ambient: reflection * Fresnel * (1 - roughness).
+    // Smooth (low roughness) surfaces reflect strongly; rough surfaces
+    // scatter and don't produce a visible reflection. Use a separate
+    // Fresnel term with n_dot_v (not v_dot_h) for ambient — grazing
+    // angles reflect more.
+    let f_ambient = fresnel_schlick(n_dot_v, f0);
+    let specular_ibl = sky_specular * f_ambient * (1.0 - roughness) * 1.5;
 
-    let ambient = (ambient_diffuse + specular_ibl) * 0.8;
+    let ambient = ambient_diffuse + specular_ibl;
 
     let lighting = ambient + (diffuse + specular) * light_radiance * n_dot_l;
 
