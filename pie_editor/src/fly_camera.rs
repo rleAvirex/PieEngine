@@ -92,9 +92,17 @@ impl EditorCamera {
     }
 
     /// Apply mouse delta (in pixels) to look, clamping pitch.
+    ///
+    /// Yaw: mouse right (positive delta_x) turns the view right, so yaw
+    /// decreases (camera forward rotates from -Z toward +X as yaw goes
+    /// negative — verify against into_transform forward.x = -sin(yaw)).
+    ///
+    /// Pitch: mouse up (negative delta_y in screen coords) should look up,
+    /// so pitch -= delta_y (mouse up → delta_y < 0 → pitch increases →
+    /// forward.y = sin(pitch) increases → looking up).
     pub fn apply_look(&mut self, delta_x: f32, delta_y: f32) {
         self.yaw -= delta_x * self.look_sensitivity;
-        self.pitch += delta_y * self.look_sensitivity;
+        self.pitch -= delta_y * self.look_sensitivity;
         self.pitch = self.pitch.clamp(-MAX_PITCH, MAX_PITCH);
         if self.yaw.abs() < YAW_EPSILON {
             self.yaw = 0.0;

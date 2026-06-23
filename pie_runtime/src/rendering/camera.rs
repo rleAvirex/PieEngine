@@ -75,11 +75,21 @@ impl CameraUniform {
         };
         let transform = transform.unwrap_or_default();
 
-        // Extract camera basis vectors from the rotation quaternion
+        // Extract camera basis vectors from the rotation quaternion, then
+        // RE-ORTHOGONALIZE so world_right is always horizontal (Y=0). This
+        // guarantees the sky shader's view-ray reconstruction
+        // (forward + right*ndc.x + up*ndc.y) can never produce a tilted
+        // horizon, even if the source rotation has tiny floating-point roll
+        // or was authored with roll (e.g. from a glTF camera).
         let rot = transform.rotation;
-        let right = rot * Vec3::X;
-        let up = rot * Vec3::Y;
-        let forward = rot * Vec3::NEG_Z; // camera looks down -Z in view space
+        let forward_raw = rot * Vec3::NEG_Z; // camera looks down -Z in view space
+        let forward = forward_raw.normalize_or_zero();
+        // right = forward × world_up — always horizontal (Y=0).
+        let right = forward.cross(Vec3::Y).normalize_or_zero();
+        // Degenerate when looking straight up/down — fall back to +X.
+        let right = if right.length_squared() > 1e-10 { right } else { Vec3::X };
+        // up = right × forward (re-orthogonalized, guaranteed ⊥ to right and forward).
+        let up = right.cross(forward);
 
         Self {
             view_proj: camera_view_proj(transform, aspect_ratio, fov).to_cols_array_2d(),
