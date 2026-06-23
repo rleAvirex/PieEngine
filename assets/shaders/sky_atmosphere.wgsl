@@ -123,17 +123,33 @@ fn compute_sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
     let cam_alt = length(cam_pos);
     let surface_alt = sky.planet_radius + 0.001;
 
-    // If the camera is at/near the origin (length < 1 mm in km units), place
-    // it at +Y on the surface so the sky renders as if the viewer is standing
-    // on the planet. Otherwise:
+    // If the camera is at/near the origin (within 1 km — covers any editor
+    // camera at meter scale), place it at +Y on the surface so the sky
+    // renders as if the viewer is standing on the planet. Otherwise:
     //  - if the camera is *inside* the planet (cam_alt < planet_radius),
     //    project it to the surface so we don't ray-march through solid ground;
     //  - if the camera is on or above the surface, use its actual position.
     let ray_origin = select(
         select(cam_pos, normalize(cam_pos) * surface_alt, cam_alt < sky.planet_radius),
         vec3<f32>(0.0, surface_alt, 0.0),
-        cam_alt < 0.000001
+        cam_alt < 1.0
     );
+
+    // Scattering coefficients — defined here (before the ray-march loop) so
+    // the transmittance formulas can use them. The old code used
+    // `sky.rayleigh_coefficient` (the raw multiplier, 800) directly as the
+    // extinction coefficient, which was ~45000× too high (800 vs 17.9e-3 per
+    // km for blue). That made transmittance exp(-800 * 8) = 0 for any
+    // meaningful path → no inscatter → black sky.
+    //
+    // The base values (5.5e-6, 13e-6, 22.4e-6 for Rayleigh, 2e-5 for Mie)
+    // times the user multiplier (800, 400) give the scattering coefficient
+    // per km. For Rayleigh blue at multiplier 800: 22.4e-6 * 800 = 17.9e-3
+    // per km. For an 8 km upward path: exp(-17.9e-3 * 8) = 0.87 transmittance
+    // — most light gets through, giving a visible blue sky.
+    let rayleigh_scattering =
+        vec3<f32>(5.5e-6, 13.0e-6, 22.4e-6) * sky.rayleigh_coefficient;
+    let mie_scattering = vec3<f32>(2.0e-5 * sky.mie_coefficient);
 
     // Find where the ray enters the atmosphere
     let t_entry = ray_atmosphere_entry(ray_origin, ray_dir);
@@ -202,9 +218,12 @@ fn compute_sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
             sun_mie_od = sun_mie_od + sun_density.y * sun_step;
         }
 
-        // Transmittance from Beer's law
-        let rayleigh_transmittance = exp(-sky.rayleigh_coefficient * (rayleigh_optical_depth + sun_rayleigh_od));
-        let mie_transmittance = exp(-sky.mie_coefficient * (mie_optical_depth + sun_mie_od));
+        // Transmittance from Beer's law: exp(-scattering_coefficient * optical_depth).
+        // Uses the actual scattering coefficients (per km), NOT the raw
+        // multiplier values from the uniform. rayleigh_scattering and
+        // mie_scattering are vec3 for wavelength-dependent extinction.
+        let rayleigh_transmittance = exp(-rayleigh_scattering * (rayleigh_optical_depth + sun_rayleigh_od));
+        let mie_transmittance = exp(-mie_scattering.x * (mie_optical_depth + sun_mie_od));
 
         let density_ray = atmosphere_density(altitude);
         rayleigh_inscatter = rayleigh_inscatter + density_ray.x * rayleigh_transmittance * step_size;
@@ -212,10 +231,6 @@ fn compute_sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
 
         t = t + step_size * 0.5;
     }
-
-    // Scattering coefficients
-    let rayleigh_scattering = vec3<f32>(5.5e-6, 13.0e-6, 22.4e-6) * sky.rayleigh_coefficient;
-    let mie_scattering = vec3<f32>(sky.mie_coefficient);
 
     // Phase functions
     let r_phase = rayleigh_phase(cos_theta);
@@ -226,7 +241,27 @@ fn compute_sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
     let rayleigh_contribution = rayleigh_inscatter * rayleigh_scattering * r_phase * sun_intensity;
     let mie_contribution = mie_inscatter * mie_scattering * m_phase * sun_intensity;
 
-    return rayleigh_contribution + mie_contribution;
+    let atmosphere_result = rayleigh_contribution + mie_contribution;
+
+    // Fallback for below-horizon rays (which hit the ground and produce no
+    // inscatter → black). The editor camera often looks down at the scene,
+    // so many view rays point below the horizon. Without this fallback, the
+    // entire viewport would be black whenever the camera is tilted down.
+    // Blend in a simple gradient based on the ray's angle from the camera's
+    // up vector, plus a sun glow.
+    let up = normalize(camera.world_up.xyz);
+    let up_dot = dot(ray_dir, up);
+    let horizon_color = vec3<f32>(0.45, 0.55, 0.75);
+    let zenith_color = vec3<f32>(0.15, 0.30, 0.60);
+    let gradient = mix(horizon_color, zenith_color, max(up_dot, 0.0));
+    let sun_dot = max(dot(ray_dir, sun_dir), 0.0);
+    let sun_glow = vec3<f32>(1.0, 0.85, 0.6) * pow(sun_dot, 200.0) * 5.0;
+    let fallback = gradient * 0.6 + sun_glow;
+
+    // Blend: if the atmosphere produced meaningful light, use it; otherwise
+    // use the gradient fallback.
+    let atmosphere_strength = clamp(length(atmosphere_result) * 5.0, 0.0, 1.0);
+    return mix(fallback, atmosphere_result, atmosphere_strength);
 }
 
 // ─── Vertex shader ──────────────────────────────────────────────────────────
