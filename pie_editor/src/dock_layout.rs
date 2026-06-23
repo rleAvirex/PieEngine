@@ -334,7 +334,6 @@ impl DockState {
 
     fn float_panel(&mut self, panel_id: PanelId, pos: Pos2, size: Vec2) {
         self.remove_panel_from_all(panel_id);
-        let idx = self.nodes.len();
         self.nodes.push(DockNode::Leaf {
             tabs: vec![panel_id],
             active_tab: 0,

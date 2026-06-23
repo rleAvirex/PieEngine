@@ -121,7 +121,7 @@ fn parse_fbx_geometries(data: &[u8], path: &Path) -> Result<Vec<FbxGeometry>, As
         ));
     }
 
-    let version_offset = FBX_MAGIC.len(); // 21
+    let version_offset = FBX_MAGIC.len() + 2; // 21 + 2 = 23; skip the \x00\x1A marker after the magic
     let version = u32::from_le_bytes(data[version_offset..version_offset + 4].try_into().unwrap());
 
     // The FBX 7.x binary header is 27 bytes: 21-byte magic + 4-byte version + 2 reserved bytes.
