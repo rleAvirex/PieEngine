@@ -115,25 +115,14 @@ fn ray_atmosphere_exit(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> f32 {
 fn compute_sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
     let sun_dir = normalize(sky.sun_direction.xyz);
 
-    // The sky shader works in km with the planet centred at the origin. The
-    // engine camera position is in world units (metres); convert to km so the
-    // ray-sphere intersection against the planet/atmosphere radii (also km)
-    // is consistent.
-    let cam_pos = camera.position.xyz * 0.001; // m → km
-    let cam_alt = length(cam_pos);
+    // UE5-style sky dome: the sky color depends ONLY on the view ray direction,
+    // never on the camera position. Using the actual camera position makes the
+    // horizon tilt / shift as the camera moves, which looks wrong for a sky
+    // dome attached to the world. Fix the ray origin at the north-pole surface
+    // point (planet_radius + epsilon on +Y) so every view ray produces the same
+    // color regardless of where the camera is.
     let surface_alt = sky.planet_radius + 0.001;
-
-    // If the camera is at/near the origin (within 1 km — covers any editor
-    // camera at meter scale), place it at +Y on the surface so the sky
-    // renders as if the viewer is standing on the planet. Otherwise:
-    //  - if the camera is *inside* the planet (cam_alt < planet_radius),
-    //    project it to the surface so we don't ray-march through solid ground;
-    //  - if the camera is on or above the surface, use its actual position.
-    let ray_origin = select(
-        select(cam_pos, normalize(cam_pos) * surface_alt, cam_alt < sky.planet_radius),
-        vec3<f32>(0.0, surface_alt, 0.0),
-        cam_alt < 1.0
-    );
+    let ray_origin = vec3<f32>(0.0, surface_alt, 0.0);
 
     // Scattering coefficients — defined here (before the ray-march loop) so
     // the transmittance formulas can use them. The old code used
@@ -243,26 +232,25 @@ fn compute_sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
 
     let atmosphere_result = rayleigh_contribution + mie_contribution;
 
-    // Fallback for below-horizon rays (which hit the ground and produce no
-    // inscatter → black). The editor camera often looks down at the scene,
-    // so many view rays point below the horizon. Without this fallback, the
-    // entire viewport would be black whenever the camera is tilted down.
-    // Blend in a simple gradient based on the ray's angle from WORLD up
-    // (not the camera's up vector — that would tilt the horizon as the
-    // camera rotates), plus a sun glow.
+    // For below-horizon rays (which hit the ground and break the ray-march
+    // with zero inscatter), blend in a horizon-color floor so the editor
+    // viewport doesn't go pure black when the camera looks down. The
+    // atmosphere result is used at full strength above the horizon; below
+    // the horizon, we fade to a dim horizon color. This is purely cosmetic
+    // — the ray-march itself produces the correct sky above the horizon.
     let up = vec3<f32>(0.0, 1.0, 0.0);
-    let up_dot = dot(ray_dir, up);
-    let horizon_color = vec3<f32>(0.45, 0.55, 0.75);
-    let zenith_color = vec3<f32>(0.15, 0.30, 0.60);
-    let gradient = mix(horizon_color, zenith_color, max(up_dot, 0.0));
+    let up_dot = clamp(dot(ray_dir, up), 0.0, 1.0);
+    let horizon_floor = vec3<f32>(0.15, 0.18, 0.22) * (0.3 + 0.7 * up_dot);
+
+    // Sun disk glow (added on top, visible in all directions near the sun).
     let sun_dot = max(dot(ray_dir, sun_dir), 0.0);
     let sun_glow = vec3<f32>(1.0, 0.85, 0.6) * pow(sun_dot, 200.0) * 5.0;
-    let fallback = gradient * 0.6 + sun_glow;
 
-    // Blend: if the atmosphere produced meaningful light, use it; otherwise
-    // use the gradient fallback.
-    let atmosphere_strength = clamp(length(atmosphere_result) * 5.0, 0.0, 1.0);
-    return mix(fallback, atmosphere_result, atmosphere_strength);
+    // Use the atmosphere result where it's nonzero; fall back to the
+    // horizon floor for ground-hit rays. Add the sun glow on top.
+    let atmosphere_strength = clamp(length(atmosphere_result) * 50.0, 0.0, 1.0);
+    let sky_color = mix(horizon_floor, atmosphere_result, atmosphere_strength);
+    return sky_color + sun_glow;
 }
 
 // ─── Vertex shader ──────────────────────────────────────────────────────────

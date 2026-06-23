@@ -190,12 +190,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let reflect_dir = reflect(-view_direction, normal);
     let sky_specular = textureSample(sky_light_cubemap, sky_light_sampler, reflect_dir).rgb;
 
-    // Diffuse ambient: sky light * base color * (1 - metallic) / PI
-    // Multiplier boosted because the sky cubemap values are low-res and dim
-    let ambient_diffuse = sky_diffuse * base_color.rgb * (1.0 - metallic) / 3.14159265 * 3.0;
+    // Diffuse ambient: sky light * base color * (1 - metallic) / PI.
+    // Multiplier boosted (10x) because the sky cubemap values are linear HDR
+    // and typically dim — without the boost, shadowed surfaces are too dark.
+    let ambient_diffuse = sky_diffuse * base_color.rgb * (1.0 - metallic) / 3.14159265 * 10.0;
 
-    // Specular ambient: sky light * Fresnel * roughness blend
-    let specular_ibl = sky_specular * f * mix(0.5, 1.0, roughness) * 2.0;
+    // Specular ambient: sky light * Fresnel * roughness blend.
+    // Also boosted for visibility.
+    let specular_ibl = sky_specular * f * mix(0.5, 1.0, roughness) * 5.0;
 
     let ambient = (ambient_diffuse + specular_ibl) * 0.8;
 
