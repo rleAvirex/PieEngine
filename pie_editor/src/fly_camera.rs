@@ -1,7 +1,9 @@
 //! First-person fly camera for the editor viewport.
 
-use glam::{Mat3, Quat, Vec3};
+use glam::{Quat, Vec3};
 use pie_runtime::components::Transform;
+// Note: glam::Mat3 is used via fully-qualified path in into_transform() to
+// avoid an unused-import warning (the import would only be used once).
 
 /// Scroll-wheel speed adjustment: each notch multiplies/divides speed by this.
 pub const SPEED_SCROLL_FACTOR: f32 = 1.15;
