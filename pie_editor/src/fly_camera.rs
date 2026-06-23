@@ -68,11 +68,28 @@ impl EditorCamera {
     }
 
     /// Camera right vector projected onto the XZ plane and re-normalised.
+    ///
+    /// Computed as `forward × world_up` (horizontal forward), which is the
+    /// correct right-handed camera right vector. Always horizontal (Y=0).
+    /// Note: this DIFFERS from the old `Ry(yaw) * X` formula, which used a
+    /// left-handed right vector and caused roll.
     pub fn right_xz(&self) -> Vec3 {
-        // Right is always horizontal with the basis-vector construction, so
-        // we can derive it directly from yaw.
-        let right = Vec3::new(self.yaw.cos(), 0.0, self.yaw.sin());
-        right.normalize_or_zero()
+        let cos_pitch = self.pitch.cos();
+        // Horizontal forward (Y=0), used only for the right-vector derivation.
+        let forward_xz = Vec3::new(
+            self.yaw.sin() * cos_pitch,
+            0.0,
+            -self.yaw.cos() * cos_pitch,
+        ).normalize_or_zero();
+        // Degenerate when looking straight up/down — fall back to -Z forward.
+        let forward_xz = if forward_xz.length_squared() > 1e-10 {
+            forward_xz
+        } else {
+            Vec3::NEG_Z
+        };
+        // right = forward × up (right-handed). forward_xz is horizontal so the
+        // result is horizontal too.
+        forward_xz.cross(Vec3::Y).normalize_or_zero()
     }
 
     /// Apply mouse delta (in pixels) to look, clamping pitch.
@@ -115,9 +132,14 @@ impl EditorCamera {
     /// Rebuild the runtime `Transform` from yaw/pitch/position. Roll is zero.
     ///
     /// Constructs the rotation from basis vectors rather than
-    /// `Ry(yaw) * Rx(pitch)` to guarantee zero roll regardless of quaternion
-    /// multiplication conventions. The right vector is always horizontal
-    /// (cross product of world-up and forward), so the horizon never tilts.
+    /// `Ry(yaw) * Rx(-pitch)` to guarantee zero roll. The original formula
+    /// `Ry(yaw) * Rx(-pitch)` produced roll because `Ry(yaw) * X` gives a
+    /// left-handed right vector in glam's right-handed coordinate system.
+    ///
+    /// The correct right-handed camera basis is:
+    ///   forward = Ry(yaw) * Rx(-pitch) * (-Z)
+    ///   right   = forward × world_up    (always horizontal → no roll)
+    ///   up      = right × backward      (where backward = -forward)
     pub fn into_transform(self) -> Transform {
         let cos_pitch = self.pitch.cos();
         // Forward from yaw/pitch. With yaw=0, pitch=0: forward = -Z.
@@ -126,18 +148,20 @@ impl EditorCamera {
             self.pitch.sin(),
             -self.yaw.cos() * cos_pitch,
         ).normalize_or_zero();
-        // Right = world_up × forward, always horizontal (Y=0).
-        let right = Vec3::Y.cross(forward).normalize_or_zero();
-        // If forward is parallel to world-up (looking straight up/down),
-        // fall back to world-right.
+        // Right = forward × world_up. Right-handed, always horizontal (Y=0).
+        let right = forward.cross(Vec3::Y).normalize_or_zero();
+        // Degenerate when looking straight up/down — fall back to +X.
         let right = if right.length_squared() > 1e-10 { right } else { Vec3::X };
-        // Up = forward × right.
-        let up = forward.cross(right);
-
-        // Build rotation matrix from basis vectors (columns = right, up, -forward).
-        // glam's from_mat3 takes column-major: [right, up, backward] where
-        // backward = -forward (because camera looks down -Z).
         let backward = -forward;
+        // Up = backward × right. For a right-handed rotation matrix with
+        // columns [right, up, backward], we need right × up = backward,
+        // which (by cyclic permutation) means up = backward × right.
+        let up = backward.cross(right);
+
+        // Build rotation matrix from basis vectors.
+        // glam's Mat3::from_cols takes column vectors: [x_axis, y_axis, z_axis].
+        // For a camera, the local axes are: x=right, y=up, z=backward(=-forward,
+        // because the camera looks down -Z in view space).
         let rotation = Quat::from_mat3(&glam::Mat3::from_cols(right, up, backward));
         Transform {
             translation: self.position,
