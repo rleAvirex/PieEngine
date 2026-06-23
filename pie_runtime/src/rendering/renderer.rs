@@ -32,6 +32,9 @@ struct MaterialUniform {
 struct LightUniform {
     direction: [f32; 4],
     color: [f32; 4],
+    // Sky light intensity (scalar multiplier for IBL). xyz unused.
+    // Must match the Light struct in textured_mesh.wgsl.
+    sky_light: [f32; 4],
 }
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -737,6 +740,9 @@ impl Renderer {
                 directional_light.color.z,
                 directional_light.intensity,
             ],
+            // Runtime renderer has no SkyLight entity — default intensity 1.0
+            // so the fallback cubemap's dim grey contributes a bit of ambient.
+            sky_light: [1.0, 0.0, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.light_buffer, 0, bytemuck::bytes_of(&light_uniform));

@@ -1,6 +1,6 @@
 //! First-person fly camera for the editor viewport.
 
-use glam::{Quat, Vec3};
+use glam::{Mat3, Quat, Vec3};
 use pie_runtime::components::Transform;
 
 /// Scroll-wheel speed adjustment: each notch multiplies/divides speed by this.
@@ -69,10 +69,10 @@ impl EditorCamera {
 
     /// Camera right vector projected onto the XZ plane and re-normalised.
     pub fn right_xz(&self) -> Vec3 {
-        let rotation = Quat::from_rotation_y(self.yaw) * Quat::from_rotation_x(-self.pitch);
-        let right = rotation * Vec3::X;
-        let projected = Vec3::new(right.x, 0.0, right.z);
-        projected.normalize_or_zero()
+        // Right is always horizontal with the basis-vector construction, so
+        // we can derive it directly from yaw.
+        let right = Vec3::new(self.yaw.cos(), 0.0, self.yaw.sin());
+        right.normalize_or_zero()
     }
 
     /// Apply mouse delta (in pixels) to look, clamping pitch.
@@ -91,8 +91,12 @@ impl EditorCamera {
         if move_axis == Vec3::ZERO {
             return;
         }
-        let rotation = Quat::from_rotation_y(self.yaw) * Quat::from_rotation_x(-self.pitch);
-        let forward_3d = (rotation * Vec3::NEG_Z).normalize_or_zero();
+        let cos_pitch = self.pitch.cos();
+        let forward_3d = Vec3::new(
+            self.yaw.sin() * cos_pitch,
+            self.pitch.sin(),
+            -self.yaw.cos() * cos_pitch,
+        ).normalize_or_zero();
         let right_horizontal = self.right_xz();
         let vertical = Vec3::Y * move_axis.z;
 
@@ -109,8 +113,32 @@ impl EditorCamera {
     }
 
     /// Rebuild the runtime `Transform` from yaw/pitch/position. Roll is zero.
+    ///
+    /// Constructs the rotation from basis vectors rather than
+    /// `Ry(yaw) * Rx(pitch)` to guarantee zero roll regardless of quaternion
+    /// multiplication conventions. The right vector is always horizontal
+    /// (cross product of world-up and forward), so the horizon never tilts.
     pub fn into_transform(self) -> Transform {
-        let rotation = Quat::from_rotation_y(self.yaw) * Quat::from_rotation_x(-self.pitch);
+        let cos_pitch = self.pitch.cos();
+        // Forward from yaw/pitch. With yaw=0, pitch=0: forward = -Z.
+        let forward = Vec3::new(
+            self.yaw.sin() * cos_pitch,
+            self.pitch.sin(),
+            -self.yaw.cos() * cos_pitch,
+        ).normalize_or_zero();
+        // Right = world_up × forward, always horizontal (Y=0).
+        let right = Vec3::Y.cross(forward).normalize_or_zero();
+        // If forward is parallel to world-up (looking straight up/down),
+        // fall back to world-right.
+        let right = if right.length_squared() > 1e-10 { right } else { Vec3::X };
+        // Up = forward × right.
+        let up = forward.cross(right);
+
+        // Build rotation matrix from basis vectors (columns = right, up, -forward).
+        // glam's from_mat3 takes column-major: [right, up, backward] where
+        // backward = -forward (because camera looks down -Z).
+        let backward = -forward;
+        let rotation = Quat::from_mat3(&glam::Mat3::from_cols(right, up, backward));
         Transform {
             translation: self.position,
             rotation,

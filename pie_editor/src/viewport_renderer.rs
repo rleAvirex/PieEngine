@@ -163,6 +163,9 @@ struct EditorMaterialUniform {
 struct EditorLightUniform {
     direction: [f32; 4],
     color: [f32; 4],
+    // Sky light intensity (scalar multiplier for IBL contribution).
+    // Stored as vec4 for 16-byte alignment; xyz unused.
+    sky_light: [f32; 4],
 }
 
 /// Sky atmosphere parameters — must match sky_atmosphere.wgsl SkyParams layout.
@@ -1538,12 +1541,20 @@ impl EditorViewportRenderer {
             .map(|(_, light)| *light)
             .next()
             .unwrap_or_default();
+        let sky_light = simulation
+            .world()
+            .query::<&SkyLight>()
+            .iter()
+            .map(|(_, sl)| *sl)
+            .next()
+            .unwrap_or_default();
         self.queue.as_ref().write_buffer(
             &self.light_buffer,
             0,
             bytemuck::bytes_of(&EditorLightUniform {
                 direction: [dl.direction.x, dl.direction.y, dl.direction.z, 0.0],
                 color: [dl.color.x, dl.color.y, dl.color.z, dl.intensity],
+                sky_light: [sky_light.intensity, 0.0, 0.0, 0.0],
             }),
         );
 

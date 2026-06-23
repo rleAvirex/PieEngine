@@ -11,6 +11,9 @@ struct Model {
 struct Light {
     direction: vec4<f32>,
     color: vec4<f32>,
+    // x = sky light intensity (multiplier for IBL contribution).
+    // yzw unused.
+    sky_light: vec4<f32>,
 };
 
 struct Material {
@@ -200,15 +203,17 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // The 3.0 multiplier compensates for the cubemap being a single-sample
     // approximation of the hemisphere irradiance (a proper irradiance
     // convolution would be ~PI times brighter than a single radiance sample).
-    let ambient_diffuse = sky_diffuse * base_color.rgb * (1.0 - metallic) * 3.0;
+    // Scaled by the SkyLight component's intensity (live from the entity).
+    let sky_intensity = light.sky_light.x;
+    let ambient_diffuse = sky_diffuse * base_color.rgb * (1.0 - metallic) * 3.0 * sky_intensity;
 
     // Specular ambient: reflection * Fresnel * (1 - roughness).
     // Smooth (low roughness) surfaces reflect strongly; rough surfaces
     // scatter and don't produce a visible reflection. Use a separate
     // Fresnel term with n_dot_v (not v_dot_h) for ambient — grazing
-    // angles reflect more.
+    // angles reflect more. Also scaled by SkyLight intensity.
     let f_ambient = fresnel_schlick(n_dot_v, f0);
-    let specular_ibl = sky_specular * f_ambient * (1.0 - roughness) * 1.5;
+    let specular_ibl = sky_specular * f_ambient * (1.0 - roughness) * 1.5 * sky_intensity;
 
     let ambient = ambient_diffuse + specular_ibl;
 
