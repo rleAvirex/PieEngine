@@ -70,8 +70,8 @@ fn compute_sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
     let horizon_t = smoothstep(-0.1, 0.15, up_dot);
     let zenith_t = smoothstep(0.0, 0.6, up_dot);
 
-    let sky_horizon = mix(ground_color, horizon_color, horizon_t);
-    let sky_final = mix(sky_horizon, zenith_color, zenith_t);
+    let sky = mix(ground_color, horizon_color, horizon_t);
+    let sky = mix(sky, zenith_color, zenith_t);
 
     // ── Sun glow ────────────────────────────────────────────────────────
     // Bright sun disk + soft halo around it.
@@ -83,7 +83,7 @@ fn compute_sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
     let sun_intensity = max(sky.sun_intensity, 0.0);
     let sun_glow = (sun_disk + sun_halo) * sun_intensity;
 
-    return sky_final + sun_glow;
+    return sky + sun_glow;
 }
 
 // ─── Vertex shader ──────────────────────────────────────────────────────────
