@@ -131,9 +131,13 @@ pub fn build_editor_ui(params: EditorUiParams<'_>) {
     } = params;
     use egui::RichText;
 
-    let toggle_running = ctx.input(|input| input.key_pressed(Key::Space));
-    let step_requested = ctx.input(|input| input.key_pressed(Key::N));
-    let reload_requested = ctx.input(|input| input.key_pressed(Key::R));
+    // Global keyboard shortcuts. Gate on `!ctx.wants_keyboard_input()` so
+    // typing in a TextEdit (e.g. the Assets search box) doesn't trigger
+    // play/pause/step/reload while the user is typing space, 'n', or 'r'.
+    let wants_kb = ctx.wants_keyboard_input();
+    let toggle_running = !wants_kb && ctx.input(|input| input.key_pressed(Key::Space));
+    let step_requested = !wants_kb && ctx.input(|input| input.key_pressed(Key::N));
+    let reload_requested = !wants_kb && ctx.input(|input| input.key_pressed(Key::R));
 
     let scene_path = &scene_info.scene_path;
     let mesh_count = scene_info.mesh_count;

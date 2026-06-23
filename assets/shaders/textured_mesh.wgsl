@@ -75,13 +75,17 @@ fn tone_map(color: vec3<f32>) -> vec3<f32> {
 
 /// ACES RRT/ODT fit by Krzysztof Narkowicz.
 /// More accurate filmic curve with better highlight rolloff.
+/// Correct formula: `(x * (a*x + b)) / (x * (c*x + d) + e)`, clamped to [0,1].
+/// The previous implementation had the constant `e` term wrongly multiplied
+/// by `x` (producing a zero denominator at x=0 → NaN), and was missing the
+/// final clamp.
 fn aces_tone_map(x: vec3<f32>) -> vec3<f32> {
     let a = vec3<f32>(0.0245786);
     let b = vec3<f32>(-0.000090537);
     let c = vec3<f32>(0.1533003);
     let d = vec3<f32>(0.00134049);
     let e = vec3<f32>(0.30);
-    return (x * (x * a + b)) / (x * (x * c + d + e));
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {

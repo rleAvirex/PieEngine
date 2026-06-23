@@ -170,7 +170,8 @@ fn parse_pie_mesh_data(
         let indices = parse_indices(
             &data[vertex_data_len..vertex_data_len + index_data_len],
             meta.index_count,
-        );
+            path,
+        )?;
 
         Ok(MeshAsset {
             name: meta.name.clone(),
@@ -199,7 +200,7 @@ fn parse_pie_mesh_data(
 
         let index_count = remaining / 4;
         let vertices = parse_vertices(&data[0..vertex_data_len], best_guess, path)?;
-        let indices = parse_indices(&data[vertex_data_len..], index_count);
+        let indices = parse_indices(&data[vertex_data_len..], index_count, path)?;
 
         Ok(MeshAsset {
             name: meta.name.clone(),
@@ -289,8 +290,27 @@ fn parse_vertices(
     Ok(vertices)
 }
 
-fn parse_indices(data: &[u8], _index_count: usize) -> Vec<u32> {
-    bytemuck::cast_slice(data).to_vec()
+fn parse_indices(
+    data: &[u8],
+    _index_count: usize,
+    path: &Path,
+) -> Result<Vec<u32>, AssetError> {
+    // `bytemuck::cast_slice` panics if `data.len()` is not a multiple of 4
+    // (the size of u32). Validate up front so a malformed pie_mesh fails
+    // gracefully instead of panicking.
+    if data.len() % 4 != 0 {
+        return Err(AssetError::io(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "pie_mesh: index buffer length {} is not a multiple of 4 (u32 size)",
+                    data.len()
+                ),
+            ),
+        ));
+    }
+    Ok(bytemuck::cast_slice(data).to_vec())
 }
 
 #[cfg(test)]

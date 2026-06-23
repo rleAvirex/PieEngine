@@ -122,12 +122,16 @@ fn parse_fbx_geometries(data: &[u8], path: &Path) -> Result<Vec<FbxGeometry>, As
     }
 
     let version_offset = FBX_MAGIC.len(); // 21
-    let _version = u32::from_le_bytes(data[version_offset..version_offset + 4].try_into().unwrap());
+    let version = u32::from_le_bytes(data[version_offset..version_offset + 4].try_into().unwrap());
 
     // The FBX 7.x binary header is 27 bytes: 21-byte magic + 4-byte version + 2 reserved bytes.
     // Records begin immediately after the header.
     let records_start = 27;
-    let records = parse_records(data, records_start, data.len(), path)?;
+    // FBX 7.5 (version 7500+) switched record header fields from u32 to u64
+    // (end_offset, num_props, prop_list_len), making each record header 25
+    // bytes instead of 13. Older versions (7.1–7.4) use 13-byte headers.
+    let header_is_64bit = version >= 7500;
+    let records = parse_records(data, records_start, data.len(), header_is_64bit, path)?;
 
     // Extract geometries from the record tree
     let mut geometries = Vec::new();
@@ -154,37 +158,53 @@ enum FbxProperty {
 }
 
 /// Recursively parse FBX binary records.
+///
+/// `header_is_64bit` selects between FBX 7.1–7.4 (32-bit header fields,
+/// 13-byte header) and FBX 7.5+ (64-bit header fields, 25-byte header).
 fn parse_records(
     data: &[u8],
     mut offset: usize,
     end: usize,
+    header_is_64bit: bool,
     path: &Path,
 ) -> Result<Vec<FbxRecord>, AssetError> {
     let mut records = Vec::new();
 
-    while offset < end.saturating_sub(13) {
-        // Record header: end_offset (4) + num_props (4) + prop_list_len (4) + name_len (1)
-        if offset + 13 > end {
-            break;
-        }
+    // Header size: 4+4+4+1 = 13 bytes for 7.1–7.4; 8+8+8+1 = 25 bytes for 7.5+.
+    let header_size = if header_is_64bit { 25 } else { 13 };
 
-        let rec_end = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-        let num_props =
-            u32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap()) as usize;
-        let _prop_list_len =
-            u32::from_le_bytes(data[offset + 8..offset + 12].try_into().unwrap()) as usize;
-        let name_len = data[offset + 12] as usize;
+    while offset < end.saturating_sub(header_size) {
+        // Record header: end_offset + num_props + prop_list_len + name_len(1)
+        let (rec_end, num_props, _prop_list_len, name_len) = if header_is_64bit {
+            let rec_end = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap()) as usize;
+            let num_props = u64::from_le_bytes(data[offset + 8..offset + 16].try_into().unwrap())
+                as usize;
+            let prop_list_len =
+                u64::from_le_bytes(data[offset + 16..offset + 24].try_into().unwrap()) as usize;
+            let name_len = data[offset + 24] as usize;
+            (rec_end, num_props, prop_list_len, name_len)
+        } else {
+            let rec_end = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+            let num_props =
+                u32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap()) as usize;
+            let prop_list_len =
+                u32::from_le_bytes(data[offset + 8..offset + 12].try_into().unwrap()) as usize;
+            let name_len = data[offset + 12] as usize;
+            (rec_end, num_props, prop_list_len, name_len)
+        };
 
         if rec_end == 0 || rec_end > end {
             break;
         }
 
-        if offset + 13 + name_len > rec_end {
+        if offset + header_size + name_len > rec_end {
             break;
         }
 
-        let name = String::from_utf8_lossy(&data[offset + 13..offset + 13 + name_len]).to_string();
-        let mut prop_offset = offset + 13 + name_len;
+        let name =
+            String::from_utf8_lossy(&data[offset + header_size..offset + header_size + name_len])
+                .to_string();
+        let mut prop_offset = offset + header_size + name_len;
 
         // Parse properties
         let mut properties = Vec::with_capacity(num_props);
@@ -276,7 +296,7 @@ fn parse_records(
 
         // Recursively parse child records
         let children = if prop_offset < rec_end {
-            parse_records(data, prop_offset, rec_end, path)?
+            parse_records(data, prop_offset, rec_end, header_is_64bit, path)?
         } else {
             Vec::new()
         };
@@ -586,7 +606,12 @@ fn polygon_indices_to_triangles(raw_indices: &[i32]) -> Vec<u32> {
 
     for &idx in raw_indices {
         if idx < 0 {
-            polygon.push((-idx - 1) as u32);
+            // FBX encodes the last vertex of a polygon as -(real_index + 1).
+            // Guard against i32::MIN (malformed FBX) which would overflow
+            // `-idx - 1` when computed naively; use wrapping arithmetic and
+            // then cast to u32.
+            let real_idx = (-idx).wrapping_sub(1) as u32;
+            polygon.push(real_idx);
         } else {
             polygon.push(idx as u32);
         }

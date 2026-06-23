@@ -670,8 +670,35 @@ impl EditorApp {
     }
 
     fn apply_camera_to_runtime(&mut self) {
+        let camera_entity = self.runtime.simulation().active_camera();
+
+        // If the user has the active camera selected and is editing its
+        // transform via the inspector, sync `editor_camera` from the entity
+        // (the inspector wrote there directly) instead of overwriting the
+        // entity from `editor_camera`. Otherwise the inspector's edits are
+        // silently reverted every frame.
+        let editing_active_camera = self
+            .selected_entity
+            .map(|e| Some(e) == camera_entity)
+            .unwrap_or(false);
+
+        if editing_active_camera {
+            if let Some(entity) = camera_entity {
+                if let Ok(transform) = self
+                    .runtime
+                    .simulation()
+                    .world()
+                    .get::<&Transform>(entity)
+                {
+                    self.editor_camera = EditorCamera::from_transform(*transform);
+                }
+            }
+            return;
+        }
+
+        // Otherwise, push the fly-camera state into the world.
         let transform = self.editor_camera.into_transform();
-        if let Some(camera_entity) = self.runtime.simulation().active_camera() {
+        if let Some(camera_entity) = camera_entity {
             let _ = self
                 .runtime
                 .simulation_mut()

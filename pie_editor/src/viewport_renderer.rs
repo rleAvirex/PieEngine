@@ -48,6 +48,13 @@ use crate::theme;
 
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// Maximum number of drawables the editor viewport can render in a single frame.
+///
+/// Each drawable occupies one slot in the model uniform buffer; if the scene
+/// exceeds this, the extras are skipped with a warning. Sized to cover any
+/// realistic editor scene without over-allocating GPU memory.
+const MAX_DRAWABLES: usize = 4096;
+
 fn create_editor_depth_texture(
     device: &wgpu::Device,
     width: u32,
@@ -197,6 +204,11 @@ pub struct EditorViewportRenderer {
     pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    /// Separate camera uniform buffer for the sky-light cubemap capture pass.
+    /// Distinct from `camera_buffer` so cubemap capture doesn't clobber the
+    /// main camera's view-projection before the scene pass reads it.
+    cubemap_camera_buffer: wgpu::Buffer,
+    cubemap_camera_bind_group: wgpu::BindGroup,
     model_buffer: wgpu::Buffer,
     model_bind_group: wgpu::BindGroup,
     light_buffer: wgpu::Buffer,
@@ -300,8 +312,11 @@ impl EditorViewportRenderer {
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
+                            has_dynamic_offset: true,
+                            min_binding_size: Some(std::num::NonZeroU64::new(
+                                std::mem::size_of::<EditorModelUniform>() as u64,
+                            )
+                            .expect("EditorModelUniform is non-zero sized")),
                         },
                         count: None,
                     }],
@@ -493,7 +508,10 @@ impl EditorViewportRenderer {
 
         let model_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
             label: Some("editor viewport model buffer"),
-            size: std::mem::size_of::<EditorModelUniform>() as u64,
+            // Allocate slots for the worst-case number of drawables per frame.
+            // Each slot is one EditorModelUniform; the per-draw bind group uses
+            // has_dynamic_offset to address a single slot by byte offset.
+            size: (std::mem::size_of::<EditorModelUniform>() * MAX_DRAWABLES) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -504,7 +522,14 @@ impl EditorViewportRenderer {
                 layout: &model_bgl,
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: model_buffer.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &model_buffer,
+                        offset: 0,
+                        size: Some(std::num::NonZeroU64::new(
+                            std::mem::size_of::<EditorModelUniform>() as u64,
+                        )
+                        .expect("EditorModelUniform is non-zero sized")),
+                    }),
                 }],
             });
 
@@ -962,14 +987,21 @@ impl EditorViewportRenderer {
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("sky bind group layout"),
                     entries: &[
-                        // binding 0: camera uniform (reuse camera buffer)
+                        // binding 0: camera uniform — has_dynamic_offset=true so
+                        // the cubemap-capture loop can address per-face slots
+                        // in a 6-wide buffer via a dynamic offset. The main
+                        // sky pass uses offset 0 against the single-slot
+                        // camera_buffer.
                         wgpu::BindGroupLayoutEntry {
                             binding: 0,
                             visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                             ty: wgpu::BindingType::Buffer {
                                 ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
+                                has_dynamic_offset: true,
+                                min_binding_size: Some(std::num::NonZeroU64::new(
+                                    std::mem::size_of::<CameraUniform>() as u64,
+                                )
+                                .expect("CameraUniform is non-zero sized")),
                             },
                             count: None,
                         },
@@ -1054,7 +1086,49 @@ impl EditorViewportRenderer {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: camera_buffer.as_entire_binding(),
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &camera_buffer,
+                            offset: 0,
+                            size: Some(std::num::NonZeroU64::new(
+                                std::mem::size_of::<CameraUniform>() as u64,
+                            )
+                            .expect("CameraUniform is non-zero sized")),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: sky_uniform_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+
+        // Separate camera buffer + sky bind group for cubemap capture, so the
+        // cubemap face capture loop can write per-face view-projections without
+        // clobbering the main camera buffer (which Pass 0 / Pass 1 read).
+        // Sized for 6 faces so we can write all 6 uniforms in one
+        // `queue.write_buffer` and then select per-face via a dynamic offset.
+        let cubemap_camera_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cubemap capture camera buffer"),
+            size: (std::mem::size_of::<CameraUniform>() * 6) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let cubemap_camera_bind_group = device
+            .as_ref()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("cubemap capture sky bind group"),
+                layout: &sky_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &cubemap_camera_buffer,
+                            offset: 0,
+                            size: Some(std::num::NonZeroU64::new(
+                                std::mem::size_of::<CameraUniform>() as u64,
+                            )
+                            .expect("CameraUniform is non-zero sized")),
+                        }),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -1124,6 +1198,8 @@ impl EditorViewportRenderer {
             pipeline,
             camera_buffer,
             camera_bind_group,
+            cubemap_camera_buffer,
+            cubemap_camera_bind_group,
             model_buffer,
             model_bind_group,
             light_buffer,
@@ -1460,8 +1536,11 @@ impl EditorViewportRenderer {
             }),
         );
 
-        // Update sky atmosphere uniform from directional light
-        let sun_dir = dl.direction;
+        // Update sky atmosphere uniform from directional light.
+        // The directional light's `direction` is the direction the light
+        // *travels* (sun → scene); the sky shader expects the direction *to*
+        // the sun (scene → sun), so we negate it before uploading.
+        let sun_dir = -dl.direction;
         let (ray_samples, mie_samples) = self.sky_quality.sample_counts();
         self.queue.as_ref().write_buffer(
             &self.sky_uniform_buffer,
@@ -1516,21 +1595,32 @@ impl EditorViewportRenderer {
                 .next()
                 .unwrap_or_default();
 
+            // Throttle real-time captures to every 4th frame for performance.
+            // The counter increments *every* frame (not just when capturing)
+            // so the throttle actually rotates — the old code only incremented
+            // inside the capture branch, so after the first capture the
+            // counter was stuck at 1 and real-time capture never re-ran.
+            let throttle_mod = self.sky_light_frame_counter;
+            self.sky_light_frame_counter = (self.sky_light_frame_counter + 1) % 4;
+
             let should_capture = self.sky_light_dirty
-                || (sky_light.real_time_capture && self.sky_light_frame_counter == 0);
+                || (sky_light.real_time_capture && throttle_mod == 0);
 
             if should_capture && self.sky_enabled {
-                // Throttle real-time captures to every 4th frame for performance.
-                self.sky_light_frame_counter = (self.sky_light_frame_counter + 1) % 4;
-
-                // Cubemap face directions: +X, -X, +Y, -Y, +Z, -Z
-                let face_rotations: [glam::Quat; 6] = [
-                    glam::Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),  // +X
-                    glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),   // -X
-                    glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),   // +Y
-                    glam::Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),  // -Y
-                    glam::Quat::from_rotation_y(std::f32::consts::PI),          // +Z
-                    glam::Quat::IDENTITY,                                       // -Z
+                // Cubemap face directions: +X, -X, +Y, -Y, +Z, -Z.
+                // The `forward` and `up` vectors follow the Vulkan/WebGPU cube
+                // convention so the captured faces sample correctly in the PBR
+                // shader's texture_cube lookups.
+                //   +X / -X / +Z / -Z faces use up = (0, -1, 0)
+                //   +Y face uses up = (0, 0, +1)
+                //   -Y face uses up = (0, 0, -1)
+                let face_basis: [(Vec3, Vec3); 6] = [
+                    (Vec3::X,   Vec3::NEG_Y), // +X
+                    (Vec3::NEG_X, Vec3::NEG_Y), // -X
+                    (Vec3::Y,   Vec3::Z),    // +Y
+                    (Vec3::NEG_Y, Vec3::NEG_Z), // -Y
+                    (Vec3::Z,   Vec3::NEG_Y), // +Z
+                    (Vec3::NEG_Z, Vec3::NEG_Y), // -Z
                 ];
 
                 let cam_pos = simulation
@@ -1560,28 +1650,32 @@ impl EditorViewportRenderer {
                 });
                 let cube_depth_view = cube_depth.create_view(&wgpu::TextureViewDescriptor::default());
 
+                // Build all 6 face CameraUniforms up front into a staging
+                // buffer, then issue a single `queue.write_buffer` for all of
+                // them. This avoids the old anti-pattern where 6 separate
+                // `write_buffer` calls (one per face, all queued before
+                // `submit`) collapsed to only the last face's value being read
+                // by the encoder.
+                let mut face_uniforms: Vec<CameraUniform> = Vec::with_capacity(6);
                 for face in 0..6 {
-                    // Build a view matrix for this cubemap face.
-                    // We use a simple approach: position at camera, look in face direction.
-                    let face_rot = face_rotations[face];
-                    let forward = face_rot * glam::Vec3::NEG_Z;
-                    let up = face_rot * glam::Vec3::Y;
+                    let (forward, up) = face_basis[face];
                     let view = Mat4::look_at_rh(cam_pos, cam_pos + forward, up);
                     let proj = Mat4::perspective_rh(fov, aspect, 0.1, 10000.0);
                     let view_proj = proj * view;
+                    face_uniforms.push(CameraUniform::from_view_proj(
+                        view_proj,
+                        cam_pos,
+                        aspect,
+                        fov,
+                    ));
+                }
+                self.queue.as_ref().write_buffer(
+                    &self.cubemap_camera_buffer,
+                    0,
+                    bytemuck::cast_slice(&face_uniforms),
+                );
 
-                    // Update camera buffer with this face's view-projection.
-                    self.queue.as_ref().write_buffer(
-                        &self.camera_buffer,
-                        0,
-                        bytemuck::bytes_of(&CameraUniform::from_view_proj(
-                            view_proj,
-                            cam_pos,
-                            aspect,
-                            fov,
-                        )),
-                    );
-
+                for face in 0..6 {
                     // Create a texture view for this specific cubemap face.
                     let face_view = self.sky_light_cubemap.create_view(
                         &wgpu::TextureViewDescriptor {
@@ -1615,7 +1709,12 @@ impl EditorViewportRenderer {
                         occlusion_query_set: None,
                     });
                     rp.set_pipeline(&self.sky_pipeline);
-                    rp.set_bind_group(0, &self.sky_bind_group, &[]);
+                    // Use the cubemap-specific bind group so we don't clobber
+                    // the main camera buffer (and don't need to restore it).
+                    // Dynamic offset selects this face's slot in
+                    // cubemap_camera_buffer.
+                    let face_offset = (face * std::mem::size_of::<CameraUniform>()) as u32;
+                    rp.set_bind_group(0, &self.cubemap_camera_bind_group, &[face_offset]);
                     rp.draw(0..3, 0..1);
                 }
             }
@@ -1652,7 +1751,7 @@ impl EditorViewportRenderer {
                 occlusion_query_set: None,
             });
             rp.set_pipeline(&self.sky_pipeline);
-            rp.set_bind_group(0, &self.sky_bind_group, &[]);
+            rp.set_bind_group(0, &self.sky_bind_group, &[0]);
             rp.draw(0..3, 0..1);
         }
 
@@ -1691,7 +1790,17 @@ impl EditorViewportRenderer {
             rp.set_bind_group(0, &self.camera_bind_group, &[]);
             rp.set_bind_group(2, &self.light_bind_group, &[]);
 
-            for d in &self.drawables {
+            // Pre-compute per-drawable model uniforms into a staging buffer so
+            // we can issue a single `queue.write_buffer` for ALL drawables
+            // before iterating the draw calls. The old code called
+            // `queue.write_buffer` inside the per-drawable render-pass loop;
+            // because queue operations are processed in order *before*
+            // `queue.submit(encoder.finish())`, every draw ended up reading
+            // the last drawable's model matrix.
+            let model_uniform_size = std::mem::size_of::<EditorModelUniform>();
+            let drawable_count = self.drawables.len().min(MAX_DRAWABLES);
+            let mut model_uniforms: Vec<EditorModelUniform> = Vec::with_capacity(drawable_count);
+            for d in self.drawables.iter().take(drawable_count) {
                 let t = simulation
                     .world()
                     .get::<&Transform>(d.entity)
@@ -1699,19 +1808,31 @@ impl EditorViewportRenderer {
                     .map(|t| *t)
                     .unwrap_or_default();
                 let m = Mat4::from_scale_rotation_translation(t.scale, t.rotation, t.translation);
-                self.queue.write_buffer(
-                    &self.model_buffer,
-                    0,
-                    bytemuck::bytes_of(&EditorModelUniform {
-                        model: m.to_cols_array_2d(),
-                        normal_matrix: m.inverse().transpose().to_cols_array_2d(),
-                    }),
-                );
-                rp.set_bind_group(1, &self.model_bind_group, &[]);
-                let mat = self
-                    .materials
-                    .get(&d.material)
-                    .expect("scene materials should be uploaded before rendering");
+                model_uniforms.push(EditorModelUniform {
+                    model: m.to_cols_array_2d(),
+                    normal_matrix: m.inverse().transpose().to_cols_array_2d(),
+                });
+            }
+            self.queue.as_ref().write_buffer(
+                &self.model_buffer,
+                0,
+                bytemuck::cast_slice(&model_uniforms),
+            );
+
+            for (index, d) in self.drawables.iter().enumerate().take(drawable_count) {
+                if index >= MAX_DRAWABLES {
+                    break;
+                }
+                // Address this drawable's slot in the model uniform buffer via
+                // dynamic offset. This is processed by the render pass at draw
+                // time (not as a separate queue op), so each draw reads the
+                // correct matrix.
+                let dynamic_offset = (index * model_uniform_size) as u32;
+                rp.set_bind_group(1, &self.model_bind_group, &[dynamic_offset]);
+                let mat = match self.materials.get(&d.material) {
+                    Some(m) => m,
+                    None => continue, // skip draws with missing materials instead of panicking
+                };
                 rp.set_bind_group(3, &mat.bind_group, &[]);
                 rp.set_vertex_buffer(0, d.mesh.vertex_buffer.slice(..));
                 rp.set_index_buffer(d.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -1930,13 +2051,38 @@ fn aabb_thick_line_vertices(min: Vec3, max: Vec3) -> [[f32; 3]; SELECTION_VERTEX
         let _len = dir.length();
         let dir_n = dir.normalize_or_zero();
 
-        // Find two perpendicular vectors to the edge direction
+        // If the edge is degenerate (zero length, e.g. an AABB where min == max),
+        // emit zeroed vertices for this edge's 12 slots to avoid NaN
+        // propagating from `normalize()` on a zero vector.
+        if dir_n.length_squared() < 1e-12 {
+            for _ in 0..12 {
+                result[idx] = [0.0; 3];
+                idx += 1;
+            }
+            continue;
+        }
+
+        // Find two perpendicular vectors to the edge direction.
+        // Use `normalize_or_zero` (not `normalize`) on the cross products so a
+        // degenerate cross result doesn't produce NaN.
         let perp1 = if dir_n.cross(Vec3::Y).length_squared() > 0.0001 {
-            dir_n.cross(Vec3::Y).normalize()
+            dir_n.cross(Vec3::Y).normalize_or_zero()
         } else {
-            dir_n.cross(Vec3::X).normalize()
+            dir_n.cross(Vec3::X).normalize_or_zero()
         };
-        let perp2 = dir_n.cross(perp1).normalize();
+        // If perp1 still ended up zero (e.g. dir_n is itself zero, which we
+        // already guarded above), fall back to a world axis to avoid NaN.
+        let perp1 = if perp1.length_squared() < 1e-12 {
+            Vec3::X
+        } else {
+            perp1
+        };
+        let perp2 = dir_n.cross(perp1).normalize_or_zero();
+        let perp2 = if perp2.length_squared() < 1e-12 {
+            Vec3::Y
+        } else {
+            perp2
+        };
 
         // Generate a thin quad (2 triangles) for each of 2 perpendicular planes
         // This creates a cross-shaped cross-section for each edge

@@ -94,22 +94,45 @@ fn ray_atmosphere_entry(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> f32 {
     return max(t, 0.0);
 }
 
+// Returns distance along ray to exit the atmosphere shell, or -1 if no hit.
+// Used together with `ray_atmosphere_entry` to compute the total march length.
+fn ray_atmosphere_exit(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> f32 {
+    let r = sky.atmosphere_radius;
+    let oc = ray_origin;
+    let a = dot(ray_dir, ray_dir);
+    let b = 2.0 * dot(oc, ray_dir);
+    let c = dot(oc, oc) - r * r;
+    let discriminant = b * b - 4.0 * a * c;
+    if discriminant < 0.0 {
+        return -1.0;
+    }
+    let sqrt_disc = sqrt(discriminant);
+    return (-b + sqrt_disc) / (2.0 * a);
+}
+
 // ─── Sky color computation ──────────────────────────────────────────────────
 
 fn compute_sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
     let sun_dir = normalize(sky.sun_direction.xyz);
 
-    // Camera position — the engine camera may be anywhere (even at the origin),
-    // but the sky atmosphere assumes the viewer is on the planet surface.
-    // If the camera is inside the planet, project it to the surface.
-    let cam_pos = camera.position.xyz;
+    // The sky shader works in km with the planet centred at the origin. The
+    // engine camera position is in world units (metres); convert to km so the
+    // ray-sphere intersection against the planet/atmosphere radii (also km)
+    // is consistent.
+    let cam_pos = camera.position.xyz * 0.001; // m → km
     let cam_alt = length(cam_pos);
     let surface_alt = sky.planet_radius + 0.001;
-    // If camera is at/near the origin, place it at +Y on the surface
+
+    // If the camera is at/near the origin (length < 1 mm in km units), place
+    // it at +Y on the surface so the sky renders as if the viewer is standing
+    // on the planet. Otherwise:
+    //  - if the camera is *inside* the planet (cam_alt < planet_radius),
+    //    project it to the surface so we don't ray-march through solid ground;
+    //  - if the camera is on or above the surface, use its actual position.
     let ray_origin = select(
-        select(cam_pos, normalize(cam_pos) * surface_alt, cam_alt >= sky.planet_radius),
+        select(cam_pos, normalize(cam_pos) * surface_alt, cam_alt < sky.planet_radius),
         vec3<f32>(0.0, surface_alt, 0.0),
-        cam_alt < 0.001
+        cam_alt < 0.000001
     );
 
     // Find where the ray enters the atmosphere
@@ -119,9 +142,17 @@ fn compute_sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
         return vec3<f32>(0.0, 0.0, 0.0);
     }
 
-    // Ray march through atmosphere
-    let total_distance = t_entry; // simplified: just use entry distance
-    let step_size = total_distance / f32(sky.ray_samples);
+    // Compute the total distance to march: from where the ray enters the
+    // atmosphere (or from the camera, if it's already inside) to where it
+    // exits. The old code used `total_distance = t_entry`, which (a) was 0
+    // whenever the camera was already inside the atmosphere (the normal
+    // case), collapsing all samples onto the camera position, and (b) for a
+    // camera outside the atmosphere, marched from the camera *to* the entry
+    // point — entirely outside the atmosphere — producing zero scattering.
+    let t_exit = ray_atmosphere_exit(ray_origin, ray_dir);
+    let t_start = max(t_entry, 0.0);
+    let total_distance = max(t_exit - t_start, 0.0);
+    let step_size = total_distance / f32(max(sky.ray_samples, 1u));
 
     let cos_theta = dot(ray_dir, sun_dir);
 
@@ -131,7 +162,7 @@ fn compute_sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
     var rayleigh_inscatter = vec3<f32>(0.0);
     var mie_inscatter = vec3<f32>(0.0);
 
-    var t = 0.0;
+    var t = t_start;
     for (var i = 0u; i < sky.ray_samples; i = i + 1u) {
         t = t + step_size * 0.5; // sample at midpoint
         let sample_pos = ray_origin + ray_dir * t;
@@ -146,10 +177,14 @@ fn compute_sky_color(ray_dir: vec3<f32>) -> vec3<f32> {
         mie_optical_depth = mie_optical_depth + density.y * step_size;
 
         // Sun ray: how much light reaches this sample point from the sun?
+        // March from sample_pos along sun_dir until the ray exits the
+        // atmosphere shell. The old code reused `sun_alt` (the sample point's
+        // altitude) as the march length, which grossly under-estimated the
+        // optical depth except when the sun was directly overhead.
         let sun_ray_dir = sun_dir;
-        let sun_cos = dot(normalize(sample_pos), sun_ray_dir);
-        let sun_alt = length(sample_pos) - sky.planet_radius;
-        let sun_step = sun_alt / f32(max(sky.mie_samples, 1u));
+        let sun_t_exit = ray_atmosphere_exit(sample_pos, sun_ray_dir);
+        let sun_total = max(sun_t_exit, 0.0);
+        let sun_step = sun_total / f32(max(sky.mie_samples, 1u));
         var sun_rayleigh_od = 0.0;
         var sun_mie_od = 0.0;
         var sun_t = 0.0;

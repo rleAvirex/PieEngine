@@ -325,8 +325,14 @@ impl LoadingScreen {
     /// Consume this loading screen and return the GPU surface, device, and queue
     /// so they can be reused by the main renderer.
     ///
-    /// This avoids creating a second GPU adapter/device when transitioning
-    /// from the loading screen to the full renderer.
+    /// NOTE: This is currently unused — `client_app::transition_to_running`
+    /// drops the loading screen and lets `Renderer::new` create its own GPU
+    /// context. Wiring this up properly requires a `Renderer::from_gpu_parts`
+    /// constructor that accepts these parts instead of creating its own
+    /// instance/adapter/device. That refactor is deferred to a future
+    /// milestone; the duplication is wasteful but functionally correct
+    /// (wgpu supports multiple devices per process).
+    #[allow(dead_code)]
     pub fn into_gpu_parts(
         self,
     ) -> (

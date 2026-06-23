@@ -24,16 +24,25 @@ pub struct CameraUniform {
 impl CameraUniform {
     /// Create a CameraUniform from a pre-built view-projection matrix and camera position.
     /// Used for cubemap face rendering where we construct view matrices manually.
+    ///
+    /// The basis vectors are derived from `V⁻¹` (not `(P·V)⁻¹`) so they
+    /// represent the camera's world-space orientation, independent of the
+    /// projection. The previous implementation extracted them from
+    /// `(P·V)⁻¹ = V⁻¹·P⁻¹`, which contaminated the basis with the
+    /// projection's z scaling — the resulting `forward` was a multiple of
+    /// `cam_pos` rather than the face's actual forward direction, so all six
+    /// cubemap faces ended up rendering essentially the same view.
     pub fn from_view_proj(view_proj: Mat4, position: Vec3, aspect_ratio: f32, fov: f32) -> Self {
-        // Extract the forward/right/up from the view-projection matrix.
-        // The view matrix is the inverse of the camera world matrix.
-        // For a view matrix V, the camera's world-space axes are in V.inverse()'s columns.
-        // But since we only need approximate basis vectors for the sky shader,
-        // we can derive them from the VP matrix.
-        let inv_vp = view_proj.inverse();
-        let right = inv_vp.x_axis.truncate();
-        let up = inv_vp.y_axis.truncate();
-        let forward = -inv_vp.z_axis.truncate(); // view space -Z maps to world forward
+        // view_proj = P · V ⇒ V = P⁻¹ · view_proj ⇒ V⁻¹ = view_proj⁻¹ · P.
+        // The camera basis vectors are the columns of V⁻¹, so we multiply the
+        // inverse of view_proj by P on the right to undo the projection before
+        // extracting the basis.
+        let proj = Mat4::perspective_rh(fov.max(0.01), aspect_ratio.max(0.01), 0.1, 100.0);
+        let view = proj.inverse() * view_proj;
+        let view_inv = view.inverse();
+        let right = view_inv.x_axis.truncate();
+        let up = view_inv.y_axis.truncate();
+        let forward = -view_inv.z_axis.truncate(); // view space -Z maps to world forward
 
         Self {
             view_proj: view_proj.to_cols_array_2d(),
@@ -48,17 +57,23 @@ impl CameraUniform {
     }
 
     pub fn from_simulation(core: &SimulationCore, aspect_ratio: f32) -> Self {
-        let transform = core
-            .active_camera()
-            .and_then(|entity| core.world().get::<&Transform>(entity).ok())
-            .map(|transform| *transform)
-            .unwrap_or_default();
-
-        let fov = core
-            .active_camera()
-            .and_then(|entity| core.world().get::<&Camera>(entity).ok())
-            .map(|cam| cam.fov)
-            .unwrap_or_else(|| Camera::default().fov);
+        // Query the active camera once instead of twice — the old code called
+        // core.active_camera() twice and world().get twice.
+        let active_camera_entity = core.active_camera();
+        let (transform, fov) = match active_camera_entity {
+            Some(entity) => {
+                let transform = core.world().get::<&Transform>(entity).ok().copied();
+                let fov = core
+                    .world()
+                    .get::<&Camera>(entity)
+                    .ok()
+                    .map(|c| c.fov)
+                    .unwrap_or_else(|| Camera::default().fov);
+                (transform, fov)
+            }
+            None => (None, Camera::default().fov),
+        };
+        let transform = transform.unwrap_or_default();
 
         // Extract camera basis vectors from the rotation quaternion
         let rot = transform.rotation;

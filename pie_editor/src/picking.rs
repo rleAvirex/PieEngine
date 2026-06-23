@@ -77,10 +77,26 @@ pub fn world_aabb(local_min: Vec3, local_max: Vec3, transform: &Transform) -> (V
 
 /// Build a world-space screen ray from a normalized device coordinate in
 /// [-1, 1] (Y up) by inverting `view_proj`.
+///
+/// If `view_proj` is non-invertible (e.g. camera has a zero scale component
+/// or a degenerate FOV), returns a zero-origin, zero-direction ray so the
+/// caller's `ray_aabb_hit` simply reports no hits — silently failing to pick
+/// is much easier to diagnose than NaN propagation through the pick logic.
 pub fn screen_ray_from_ndc(ndc: Vec2, view_proj: Mat4) -> (Vec3, Vec3) {
-    let near_point = view_proj.inverse() * Vec4::new(ndc.x, ndc.y, -1.0, 1.0);
-    let far_point = view_proj.inverse() * Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
+    let inv = view_proj.inverse();
+    // glam's Mat4::inverse returns a matrix of NaNs if the input is singular.
+    // Detect that case by checking one element; if any component is NaN, the
+    // whole inverse is corrupt and we should bail out with a no-hit ray.
+    if inv.x_axis.x.is_nan() || inv.x_axis.w.is_nan() || inv.w_axis.w.is_nan() {
+        return (Vec3::ZERO, Vec3::ZERO);
+    }
+    let near_point = inv * Vec4::new(ndc.x, ndc.y, -1.0, 1.0);
+    let far_point = inv * Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
 
+    // Guard against zero w (degenerate homogeneous coordinate).
+    if near_point.w.abs() < 1e-12 || far_point.w.abs() < 1e-12 {
+        return (Vec3::ZERO, Vec3::ZERO);
+    }
     let near = near_point.xyz() / near_point.w;
     let far = far_point.xyz() / far_point.w;
     let dir = far - near;

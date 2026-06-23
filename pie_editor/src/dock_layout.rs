@@ -121,6 +121,11 @@ pub enum DockNode {
         active_tab: usize,
         /// The screen rect allocated to this leaf.
         rect: Rect,
+        /// Which dock zone this leaf is attached to, or `None` if it's a
+        /// floating window. Stored on the leaf itself (rather than inferred
+        /// from the node index) so the Vec can be compacted by `retain`
+        /// without breaking zone lookups.
+        zone: Option<DockZone>,
     },
     /// A split node dividing space between two children.
     Split {
@@ -183,9 +188,9 @@ impl Default for DockState {
         zone_sizes.insert(DockZone::Right, 320.0);
         zone_sizes.insert(DockZone::Bottom, 200.0);
 
-        // Default layout: root split (vertical) → left leaf | right split
-        // Left leaf: [Outliner]
-        // Right split: [Details] | (empty, for viewport)
+        // Default layout: root split (vertical) → left leaf | right leaf.
+        // Left leaf: [Outliner] docked to Left zone.
+        // Right leaf: [Details] docked to Right zone.
         let nodes = vec![
             DockNode::Split {
                 vertical: true,
@@ -198,11 +203,13 @@ impl Default for DockState {
                 tabs: vec![PanelId::Outliner],
                 active_tab: 0,
                 rect: Rect::NOTHING,
+                zone: Some(DockZone::Left),
             },
             DockNode::Leaf {
                 tabs: vec![PanelId::Details],
                 active_tab: 0,
                 rect: Rect::NOTHING,
+                zone: Some(DockZone::Right),
             },
         ];
 
@@ -288,23 +295,37 @@ impl DockState {
         // Remove panel from its current location
         self.remove_panel_from_all(panel_id);
 
-        // Find or create a leaf for this zone
-        let zone_idx = match zone {
-            DockZone::Left => 1usize,
-            DockZone::Right => 2usize,
-            DockZone::Bottom => {
-                // Create a bottom leaf if it doesn't exist
+        // Find an existing leaf already docked to this zone. We look up by
+        // the leaf's `zone` field rather than by hardcoded node index — the
+        // old code assumed `nodes[1]=Left, nodes[2]=Right, nodes[3]=Bottom`
+        // forever, but `remove_panel_from_all` calls `retain` which compacts
+        // the Vec and shifts indices, so the hardcoded mapping broke after
+        // any float/remove.
+        let existing_leaf_idx = self.nodes.iter().enumerate().find_map(|(idx, node)| match node {
+            DockNode::Leaf { zone: leaf_zone, tabs, .. }
+                if *leaf_zone == Some(zone) && !tabs.is_empty() =>
+            {
+                Some(idx)
+            }
+            _ => None,
+        });
+
+        let target_idx = match existing_leaf_idx {
+            Some(idx) => idx,
+            None => {
+                // No existing leaf for this zone — create a new one.
                 let idx = self.nodes.len();
                 self.nodes.push(DockNode::Leaf {
                     tabs: vec![],
                     active_tab: 0,
                     rect: Rect::NOTHING,
+                    zone: Some(zone),
                 });
                 idx
             }
         };
 
-        if let Some(DockNode::Leaf { tabs, .. }) = self.nodes.get_mut(zone_idx) {
+        if let Some(DockNode::Leaf { tabs, .. }) = self.nodes.get_mut(target_idx) {
             if !tabs.contains(&panel_id) {
                 tabs.push(panel_id);
             }
@@ -318,11 +339,9 @@ impl DockState {
             tabs: vec![panel_id],
             active_tab: 0,
             rect: Rect::from_min_size(pos, size),
+            // Floating leaves have no zone.
+            zone: None,
         });
-        // Mark as floating by storing a special rect
-        if let Some(DockNode::Leaf { rect, .. }) = self.nodes.get_mut(idx) {
-            *rect = Rect::from_min_size(pos, size);
-        }
     }
 
     fn collapse_panel(&mut self, panel_id: PanelId) {
@@ -398,7 +417,7 @@ pub fn show_dock(
     let mut float_renders: Vec<(usize, Rect, Vec<PanelId>, usize)> = Vec::new();
 
     for (idx, node) in dock.nodes.iter().enumerate() {
-        if let DockNode::Leaf { tabs, active_tab, rect } = node {
+        if let DockNode::Leaf { tabs, active_tab, rect, .. } = node {
             if tabs.is_empty() {
                 continue;
             }
@@ -497,13 +516,12 @@ fn assign_rects(dock: &mut DockState, full_rect: Rect) {
     }
 }
 
-/// Determine zone by node index (avoids borrow issues with searching).
-fn node_zone_by_index(_dock: &DockState, idx: usize, _node: &DockNode) -> Option<DockZone> {
-    match idx {
-        1 => Some(DockZone::Left),
-        2 => Some(DockZone::Right),
-        3 => Some(DockZone::Bottom),
-        _ => None,
+/// Determine zone by inspecting the leaf's stored `zone` field. Floating
+/// leaves (zone == None) return None. Split nodes always return None.
+fn node_zone_by_index(_dock: &DockState, _idx: usize, node: &DockNode) -> Option<DockZone> {
+    match node {
+        DockNode::Leaf { zone, .. } => *zone,
+        DockNode::Split { .. } => None,
     }
 }
 
@@ -769,10 +787,51 @@ fn render_floating(
 
 fn render_resize_handle(ctx: &Context, dock: &mut DockState, leaf_idx: usize, rect: Rect) {
     let handle_w = 6.0;
-    let handle_rect = Rect::from_min_size(
-        Pos2::new(rect.max.x - handle_w * 0.5, rect.min.y),
-        Vec2::new(handle_w, rect.height()),
-    );
+    let zone = node_zone_by_index(dock, leaf_idx, &dock.nodes[leaf_idx]);
+
+    // Resize handle position and orientation depends on the zone:
+    //  - Left zone: handle on the RIGHT edge of the rect, drag horizontally.
+    //    Dragging right grows the zone (correct).
+    //  - Right zone: handle on the LEFT edge of the rect, drag horizontally.
+    //    Dragging right SHRINKS the zone — so we use -delta.x.
+    //  - Bottom zone: handle on the TOP edge of the rect, drag vertically.
+    //    Dragging down SHRINKS the zone — so we use -delta.y, and we measure
+    //    rect.height() rather than rect.width().
+    // The old code always put the handle on the right edge and used
+    // `rect.width() + delta.x`, which (a) grew the Right zone when it should
+    // have shrunk, and (b) used the horizontal axis + width for the Bottom
+    // zone (whose rect spans the full viewport width).
+    let (handle_rect, cursor_icon, is_vertical_zone) = match zone {
+        Some(DockZone::Left) => (
+            Rect::from_min_size(
+                Pos2::new(rect.max.x - handle_w * 0.5, rect.min.y),
+                Vec2::new(handle_w, rect.height()),
+            ),
+            CursorIcon::ResizeHorizontal,
+            false,
+        ),
+        Some(DockZone::Right) => (
+            Rect::from_min_size(
+                Pos2::new(rect.min.x - handle_w * 0.5, rect.min.y),
+                Vec2::new(handle_w, rect.height()),
+            ),
+            CursorIcon::ResizeHorizontal,
+            false,
+        ),
+        Some(DockZone::Bottom) => (
+            Rect::from_min_size(
+                Pos2::new(rect.min.x, rect.min.y - handle_w * 0.5),
+                Vec2::new(rect.width(), handle_w),
+            ),
+            CursorIcon::ResizeVertical,
+            true,
+        ),
+        None => {
+            // Floating leaf — no resize handle (floating windows use their
+            // own window-frame resize provided by the OS/egui Area).
+            return;
+        }
+    };
 
     Area::new(Id::new(("resize", leaf_idx)))
         .fixed_pos(handle_rect.min)
@@ -795,15 +854,33 @@ fn render_resize_handle(ctx: &Context, dock: &mut DockState, leaf_idx: usize, re
 
             if resp.dragged() {
                 let delta = resp.drag_delta();
-                let new_size = (rect.width() + delta.x).clamp(120.0, 800.0);
-                let zone = node_zone_by_index(dock, leaf_idx, &dock.nodes[leaf_idx]);
-                if zone.is_some() {
-                    dock.push_cmd(DockCmd::ResizeZone(zone.unwrap(), new_size));
+                let new_size = if is_vertical_zone {
+                    // Bottom zone: vertical drag on top edge.
+                    // Dragging the handle DOWN shrinks the bottom zone (the
+                    // handle moves down, leaving less space below).
+                    (rect.height() - delta.y).clamp(120.0, 800.0)
+                } else {
+                    match zone {
+                        Some(DockZone::Right) => {
+                            // Right zone: handle on LEFT edge; dragging right
+                            // shrinks the zone.
+                            (rect.width() - delta.x).clamp(120.0, 800.0)
+                        }
+                        Some(DockZone::Left) => {
+                            // Left zone: handle on RIGHT edge; dragging right
+                            // grows the zone.
+                            (rect.width() + delta.x).clamp(120.0, 800.0)
+                        }
+                        _ => return, // unreachable given is_vertical_zone=false here
+                    }
+                };
+                if let Some(z) = zone {
+                    dock.push_cmd(DockCmd::ResizeZone(z, new_size));
                 }
             }
 
             if hover {
-                ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
+                ctx.set_cursor_icon(cursor_icon);
             }
         });
 }
@@ -895,9 +972,12 @@ fn render_drop_targets(dock: &mut DockState, ctx: &Context, full_rect: Rect) {
             });
     }
 
-    // Handle drag end — check if we're over a drop target
+    // Handle drag end — check if we're over a drop target.
+    // Only respond to the primary mouse button being released; the old code
+    // used `any_released()` which would end the drag if a secondary button
+    // was clicked during the drag (e.g. right-click for context menu).
     let input = ctx.input(|i| i.clone());
-    if input.pointer.any_released() {
+    if input.pointer.button_released(egui::PointerButton::Primary) {
         for zone in DockZone::ALL {
             let zone_rect = match zone {
                 DockZone::Left => Rect::from_min_size(

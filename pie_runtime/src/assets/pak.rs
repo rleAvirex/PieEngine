@@ -80,6 +80,17 @@ impl PakFile {
         let mut count_buf = [0u8; 4];
         reader.read_exact(&mut count_buf)?;
         let asset_count = u32::from_le_bytes(count_buf) as usize;
+        // Sanity bound: a pak with > 100k assets is almost certainly corrupt
+        // or malicious. Avoids a multi-GB `Vec::with_capacity` allocation.
+        const MAX_ASSET_COUNT: usize = 100_000;
+        if asset_count > MAX_ASSET_COUNT {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "pak asset count {asset_count} exceeds sane maximum {MAX_ASSET_COUNT}"
+                ),
+            ));
+        }
 
         let mut assets = Vec::with_capacity(asset_count);
         for _ in 0..asset_count {
@@ -95,6 +106,14 @@ impl PakFile {
             let mut name_len_buf = [0u8; 4];
             reader.read_exact(&mut name_len_buf)?;
             let name_len = u32::from_le_bytes(name_len_buf) as usize;
+            // Sanity bound on asset names: > 4 KB is corrupt/malicious.
+            const MAX_NAME_LEN: usize = 4096;
+            if name_len > MAX_NAME_LEN {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("asset name length {name_len} exceeds sane maximum {MAX_NAME_LEN}"),
+                ));
+            }
 
             let mut name_buf = vec![0u8; name_len];
             reader.read_exact(&mut name_buf)?;
@@ -108,6 +127,14 @@ impl PakFile {
             let mut data_len_buf = [0u8; 8];
             reader.read_exact(&mut data_len_buf)?;
             let data_len = u64::from_le_bytes(data_len_buf) as usize;
+            // Sanity bound on a single asset's data: > 1 GB is corrupt/malicious.
+            const MAX_DATA_LEN: usize = 1024 * 1024 * 1024;
+            if data_len > MAX_DATA_LEN {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("asset data length {data_len} exceeds sane maximum {MAX_DATA_LEN}"),
+                ));
+            }
 
             let mut data = vec![0u8; data_len];
             reader.read_exact(&mut data)?;
