@@ -55,6 +55,15 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// realistic editor scene without over-allocating GPU memory.
 const MAX_DRAWABLES: usize = 4096;
 
+/// Stride between drawable slots in the model uniform buffer, and between
+/// cubemap face slots in the cubemap-camera buffer.
+///
+/// Both `EditorModelUniform` (128 bytes) and `CameraUniform` (144 bytes) are
+/// smaller than wgpu's `min_uniform_buffer_offset_alignment` (256 on most
+/// GPUs). We round each slot up to 256 so per-draw / per-face dynamic offsets
+/// stay 256-aligned.
+const UNIFORM_BUFFER_STRIDE: usize = 256;
+
 fn create_editor_depth_texture(
     device: &wgpu::Device,
     width: u32,
@@ -511,7 +520,7 @@ impl EditorViewportRenderer {
             // Allocate slots for the worst-case number of drawables per frame.
             // Each slot is one EditorModelUniform; the per-draw bind group uses
             // has_dynamic_offset to address a single slot by byte offset.
-            size: (std::mem::size_of::<EditorModelUniform>() * MAX_DRAWABLES) as u64,
+            size: (UNIFORM_BUFFER_STRIDE * MAX_DRAWABLES) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1107,9 +1116,11 @@ impl EditorViewportRenderer {
         // clobbering the main camera buffer (which Pass 0 / Pass 1 read).
         // Sized for 6 faces so we can write all 6 uniforms in one
         // `queue.write_buffer` and then select per-face via a dynamic offset.
+        // Each slot is UNIFORM_BUFFER_STRIDE (256) bytes, not sizeof(CameraUniform)
+        // (144), to satisfy wgpu's min_uniform_buffer_offset_alignment.
         let cubemap_camera_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
             label: Some("cubemap capture camera buffer"),
-            size: (std::mem::size_of::<CameraUniform>() * 6) as u64,
+            size: (UNIFORM_BUFFER_STRIDE * 6) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1656,23 +1667,30 @@ impl EditorViewportRenderer {
                 // `write_buffer` calls (one per face, all queued before
                 // `submit`) collapsed to only the last face's value being read
                 // by the encoder.
-                let mut face_uniforms: Vec<CameraUniform> = Vec::with_capacity(6);
+                // Build a padded byte buffer: each CameraUniform (144 bytes)
+                // is placed at a 256-byte-aligned offset so the per-face
+                // dynamic offset `(face * UNIFORM_BUFFER_STRIDE)` satisfies
+                // wgpu's min_uniform_buffer_offset_alignment.
+                let mut face_uniforms_padded: Vec<u8> = vec![0u8; 6 * UNIFORM_BUFFER_STRIDE];
                 for face in 0..6 {
                     let (forward, up) = face_basis[face];
                     let view = Mat4::look_at_rh(cam_pos, cam_pos + forward, up);
                     let proj = Mat4::perspective_rh(fov, aspect, 0.1, 10000.0);
                     let view_proj = proj * view;
-                    face_uniforms.push(CameraUniform::from_view_proj(
+                    let uniform = CameraUniform::from_view_proj(
                         view_proj,
                         cam_pos,
                         aspect,
                         fov,
-                    ));
+                    );
+                    let bytes = bytemuck::bytes_of(&uniform);
+                    let offset = face * UNIFORM_BUFFER_STRIDE;
+                    face_uniforms_padded[offset..offset + bytes.len()].copy_from_slice(bytes);
                 }
                 self.queue.as_ref().write_buffer(
                     &self.cubemap_camera_buffer,
                     0,
-                    bytemuck::cast_slice(&face_uniforms),
+                    &face_uniforms_padded,
                 );
 
                 for face in 0..6 {
@@ -1712,8 +1730,10 @@ impl EditorViewportRenderer {
                     // Use the cubemap-specific bind group so we don't clobber
                     // the main camera buffer (and don't need to restore it).
                     // Dynamic offset selects this face's slot in
-                    // cubemap_camera_buffer.
-                    let face_offset = (face * std::mem::size_of::<CameraUniform>()) as u32;
+                    // cubemap_camera_buffer. Stride is 256 (not
+                    // sizeof(CameraUniform) = 144) to satisfy wgpu's
+                    // min_uniform_buffer_offset_alignment.
+                    let face_offset = (face * UNIFORM_BUFFER_STRIDE) as u32;
                     rp.set_bind_group(0, &self.cubemap_camera_bind_group, &[face_offset]);
                     rp.draw(0..3, 0..1);
                 }
@@ -1797,10 +1817,14 @@ impl EditorViewportRenderer {
             // because queue operations are processed in order *before*
             // `queue.submit(encoder.finish())`, every draw ended up reading
             // the last drawable's model matrix.
-            let model_uniform_size = std::mem::size_of::<EditorModelUniform>();
             let drawable_count = self.drawables.len().min(MAX_DRAWABLES);
-            let mut model_uniforms: Vec<EditorModelUniform> = Vec::with_capacity(drawable_count);
-            for d in self.drawables.iter().take(drawable_count) {
+            // Build a padded byte buffer: each EditorModelUniform (128 bytes)
+            // is placed at a 256-byte-aligned offset so the per-draw dynamic
+            // offset `(index * UNIFORM_BUFFER_STRIDE)` satisfies wgpu's
+            // min_uniform_buffer_offset_alignment (typically 256).
+            let mut model_uniforms_padded: Vec<u8> =
+                vec![0u8; drawable_count * UNIFORM_BUFFER_STRIDE];
+            for (index, d) in self.drawables.iter().enumerate().take(drawable_count) {
                 let t = simulation
                     .world()
                     .get::<&Transform>(d.entity)
@@ -1808,15 +1832,18 @@ impl EditorViewportRenderer {
                     .map(|t| *t)
                     .unwrap_or_default();
                 let m = Mat4::from_scale_rotation_translation(t.scale, t.rotation, t.translation);
-                model_uniforms.push(EditorModelUniform {
+                let uniform = EditorModelUniform {
                     model: m.to_cols_array_2d(),
                     normal_matrix: m.inverse().transpose().to_cols_array_2d(),
-                });
+                };
+                let bytes = bytemuck::bytes_of(&uniform);
+                let offset = index * UNIFORM_BUFFER_STRIDE;
+                model_uniforms_padded[offset..offset + bytes.len()].copy_from_slice(bytes);
             }
             self.queue.as_ref().write_buffer(
                 &self.model_buffer,
                 0,
-                bytemuck::cast_slice(&model_uniforms),
+                &model_uniforms_padded,
             );
 
             for (index, d) in self.drawables.iter().enumerate().take(drawable_count) {
@@ -1826,8 +1853,9 @@ impl EditorViewportRenderer {
                 // Address this drawable's slot in the model uniform buffer via
                 // dynamic offset. This is processed by the render pass at draw
                 // time (not as a separate queue op), so each draw reads the
-                // correct matrix.
-                let dynamic_offset = (index * model_uniform_size) as u32;
+                // correct matrix. Stride is 256 (not sizeof(EditorModelUniform)
+                // = 128) to satisfy wgpu's min_uniform_buffer_offset_alignment.
+                let dynamic_offset = (index * UNIFORM_BUFFER_STRIDE) as u32;
                 rp.set_bind_group(1, &self.model_bind_group, &[dynamic_offset]);
                 let mat = match self.materials.get(&d.material) {
                     Some(m) => m,

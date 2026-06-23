@@ -43,6 +43,14 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// realistic editor scene without over-allocating GPU memory.
 const MAX_DRAWABLES: usize = 4096;
 
+/// Stride between drawable slots in the model uniform buffer.
+///
+/// `ModelUniform` is 128 bytes, but wgpu requires dynamic uniform buffer
+/// offsets to be aligned to `min_uniform_buffer_offset_alignment` (256 on
+/// most GPUs). We round each slot up to 256 so the per-draw dynamic offset
+/// `(index * MODEL_UNIFORM_STRIDE)` stays 256-aligned.
+const MODEL_UNIFORM_STRIDE: usize = 256;
+
 fn create_depth_texture(
     device: &wgpu::Device,
     width: u32,
@@ -390,7 +398,7 @@ impl Renderer {
             // Allocate slots for the worst-case number of drawables per frame.
             // Each slot is one ModelUniform; the per-draw bind group uses
             // has_dynamic_offset to address a single slot by byte offset.
-            size: (std::mem::size_of::<ModelUniform>() * MAX_DRAWABLES) as u64,
+            size: (MODEL_UNIFORM_STRIDE * MAX_DRAWABLES) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -739,10 +747,14 @@ impl Renderer {
         // the per-drawable render-pass loop; because queue operations are
         // processed in order *before* `queue.submit(encoder.finish())`, every
         // draw ended up reading the last drawable's model matrix.
-        let model_uniform_size = std::mem::size_of::<ModelUniform>();
         let drawable_count = self.drawables.len().min(MAX_DRAWABLES);
-        let mut model_uniforms: Vec<ModelUniform> = Vec::with_capacity(drawable_count);
-        for drawable in self.drawables.iter().take(drawable_count) {
+        // Build a padded byte buffer: each ModelUniform (128 bytes) is placed
+        // at a 256-byte-aligned offset so the per-draw dynamic offset
+        // `(index * MODEL_UNIFORM_STRIDE)` satisfies wgpu's
+        // `min_uniform_buffer_offset_alignment` (typically 256).
+        let mut model_uniforms_padded: Vec<u8> =
+            vec![0u8; drawable_count * MODEL_UNIFORM_STRIDE];
+        for (index, drawable) in self.drawables.iter().enumerate().take(drawable_count) {
             let transform = simulation
                 .world()
                 .get::<&Transform>(drawable.entity)
@@ -750,17 +762,16 @@ impl Renderer {
                 .map(|transform| *transform)
                 .unwrap_or_default();
             let model = transform_to_matrix(transform);
-            model_uniforms.push(ModelUniform {
+            let uniform = ModelUniform {
                 model: model.to_cols_array_2d(),
                 normal_matrix: model.inverse().transpose().to_cols_array_2d(),
-            });
+            };
+            let bytes = bytemuck::bytes_of(&uniform);
+            let offset = index * MODEL_UNIFORM_STRIDE;
+            model_uniforms_padded[offset..offset + bytes.len()].copy_from_slice(bytes);
         }
-        // Single write of the entire model uniform array.
-        self.queue.write_buffer(
-            &self.model_buffer,
-            0,
-            bytemuck::cast_slice(&model_uniforms),
-        );
+        // Single write of the entire (padded) model uniform buffer.
+        self.queue.write_buffer(&self.model_buffer, 0, &model_uniforms_padded);
 
         let frame = self.surface.get_current_texture()?;
         let view = frame
@@ -812,8 +823,9 @@ impl Renderer {
                 // Address this drawable's slot in the model uniform buffer via
                 // dynamic offset. This is processed by the render pass at draw
                 // time (not as a separate queue op), so each draw reads the
-                // correct matrix.
-                let dynamic_offset = (index * model_uniform_size) as u32;
+                // correct matrix. The stride is 256 (not sizeof(ModelUniform)
+                // = 128) to satisfy wgpu's min_uniform_buffer_offset_alignment.
+                let dynamic_offset = (index * MODEL_UNIFORM_STRIDE) as u32;
                 render_pass.set_bind_group(1, &self.model_bind_group, &[dynamic_offset]);
                 let material = self
                     .materials
