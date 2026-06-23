@@ -135,7 +135,7 @@ impl ApplicationHandler for ClientApp {
             }
             WindowEvent::Resized(size) => {
                 match self.phase {
-                    ClientPhase::Loading => {
+                    ClientPhase::Loading | ClientPhase::Fatal => {
                         if let Some(loading) = self.loading_screen.as_mut() {
                             loading.resize(size.width, size.height);
                         }
@@ -158,7 +158,9 @@ impl ApplicationHandler for ClientApp {
                 self.runtime.update(delta_seconds);
 
                 match self.phase {
-                    ClientPhase::Loading => self.render_loading_frame(event_loop),
+                    ClientPhase::Loading | ClientPhase::Fatal => {
+                        self.render_loading_frame(event_loop)
+                    }
                     ClientPhase::Running => self.render_scene_frame(event_loop),
                 }
 

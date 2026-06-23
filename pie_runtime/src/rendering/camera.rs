@@ -62,7 +62,7 @@ impl CameraUniform {
         let active_camera_entity = core.active_camera();
         let (transform, fov) = match active_camera_entity {
             Some(entity) => {
-                let transform = core.world().get::<&Transform>(entity).ok().copied();
+                let transform = core.world().get::<&Transform>(entity).ok().map(|t| *t);
                 let fov = core
                     .world()
                     .get::<&Camera>(entity)
