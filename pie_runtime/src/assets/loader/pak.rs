@@ -58,6 +58,20 @@ pub fn load_pak(path: &Path) -> Result<AssetRegistry, AssetError> {
 
     let asset_count = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
     offset += 4;
+    // Sanity bound: a pak with > 100k assets is almost certainly corrupt or
+    // malicious. Avoids a multi-GB `Vec::with_capacity` allocation.
+    const MAX_ASSET_COUNT: usize = 100_000;
+    if asset_count > MAX_ASSET_COUNT {
+        return Err(AssetError::io(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "pak asset count {asset_count} exceeds sane maximum {MAX_ASSET_COUNT}"
+                ),
+            ),
+        ));
+    }
 
     // Helper: read a slice of `len` bytes, advancing offset.
     fn read_bytes<'a>(
@@ -97,7 +111,21 @@ pub fn load_pak(path: &Path) -> Result<AssetRegistry, AssetError> {
         let kind = kind_slice[0];
 
         let name_len =
-            u32::from_le_bytes(read_bytes(&data, &mut offset, 4, path)?.try_into().unwrap()) as usize;
+            u32::from_le_bytes(read_bytes(&data, &mut offset, 4, path)?.try_into().unwrap())
+                as usize;
+        // Sanity bound on asset names: > 4 KB is corrupt/malicious.
+        const MAX_NAME_LEN: usize = 4096;
+        if name_len > MAX_NAME_LEN {
+            return Err(AssetError::io(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "asset name length {name_len} exceeds sane maximum {MAX_NAME_LEN}"
+                    ),
+                ),
+            ));
+        }
         let name_bytes = read_bytes(&data, &mut offset, name_len, path)?;
         let name = String::from_utf8(name_bytes.to_vec()).map_err(|error| {
             AssetError::io(
@@ -110,7 +138,21 @@ pub fn load_pak(path: &Path) -> Result<AssetRegistry, AssetError> {
         })?;
 
         let data_len =
-            u64::from_le_bytes(read_bytes(&data, &mut offset, 8, path)?.try_into().unwrap()) as usize;
+            u64::from_le_bytes(read_bytes(&data, &mut offset, 8, path)?.try_into().unwrap())
+                as usize;
+        // Sanity bound on a single asset's data: > 1 GB is corrupt/malicious.
+        const MAX_DATA_LEN: usize = 1024 * 1024 * 1024;
+        if data_len > MAX_DATA_LEN {
+            return Err(AssetError::io(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "asset data length {data_len} exceeds sane maximum {MAX_DATA_LEN}"
+                    ),
+                ),
+            ));
+        }
         let entry_data = read_bytes(&data, &mut offset, data_len, path)?.to_vec();
 
         raw_entries.push(RawEntry {
@@ -209,12 +251,9 @@ fn decode_material(
     texture_handles: &[crate::assets::TextureHandle],
 ) -> Result<MaterialAsset, String> {
     // Layout: base_color_factor [f32; 4] + metallic f32 + roughness f32 + base_tex_idx u32 + normal_tex_idx u32
-    let expected_len = 4 * 4 + 4 + 4 + 4 + 4; // 28 bytes
+    let expected_len = 4 * 4 + 4 + 4 + 4 + 4; // 32 bytes
     if data.len() < expected_len {
-        return Err(format!(
-            "material '{name}' data too short: {}",
-            data.len()
-        ));
+        return Err(format!("material '{name}' data too short: {}", data.len()));
     }
 
     let mut off = 0;
@@ -229,7 +268,12 @@ fn decode_material(
         value
     };
 
-    let base_color_factor = [read_f32(&mut off), read_f32(&mut off), read_f32(&mut off), read_f32(&mut off)];
+    let base_color_factor = [
+        read_f32(&mut off),
+        read_f32(&mut off),
+        read_f32(&mut off),
+        read_f32(&mut off),
+    ];
     let metallic_factor = read_f32(&mut off);
     let roughness_factor = read_f32(&mut off);
     let base_tex_idx = read_u32(&mut off);

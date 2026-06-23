@@ -15,7 +15,13 @@ pub struct ImportedNode {
     pub translation: Vec3,
     pub rotation: Quat,
     pub scale: Vec3,
-    pub mesh: Option<MeshHandle>,
+    /// One handle per mesh primitive referenced by this node. Empty if the
+    /// node has no mesh. A multi-primitive glTF mesh produces multiple entries
+    /// here, each with its own material — the old code merged all primitives
+    /// into a single `MeshAsset` and kept only the last primitive's material,
+    /// silently dropping the materials of earlier primitives (e.g. a cube
+    /// with one material per face would render with only one material).
+    pub mesh: Vec<MeshHandle>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -78,7 +84,7 @@ pub fn load_gltf_scene(
         1.0,
     ));
 
-    let mut mesh_handles = Vec::new();
+    let mut mesh_handles: Vec<Vec<MeshHandle>> = Vec::new();
 
     for mesh in document.meshes() {
         let mesh_name = mesh
@@ -86,11 +92,9 @@ pub fn load_gltf_scene(
             .map(str::to_string)
             .unwrap_or_else(|| format!("mesh_{}", mesh_handles.len()));
 
-        let mut combined_vertices = Vec::new();
-        let mut combined_indices = Vec::new();
-        let mut mesh_material = default_material;
+        let mut primitive_handles: Vec<MeshHandle> = Vec::new();
 
-        for primitive in mesh.primitives() {
+        for (prim_index, primitive) in mesh.primitives().enumerate() {
             let reader = primitive
                 .reader(|buffer| buffers.get(buffer.index()).map(|data| data.0.as_slice()));
 
@@ -124,15 +128,12 @@ pub fn load_gltf_scene(
 
             let tangents = reader
                 .read_tangents()
-                .map(|t| {
-                    t.map(|t| [t[0], t[1], t[2], t[3]])
-                        .collect::<Vec<_>>()
-                })
+                .map(|t| t.map(|t| [t[0], t[1], t[2], t[3]]).collect::<Vec<_>>())
                 .unwrap_or_else(|| vec![[1.0, 0.0, 0.0, 1.0]; positions.len()]);
 
-            let base_index = combined_vertices.len() as u32;
+            let mut vertices = Vec::with_capacity(positions.len());
             for vertex_index in 0..positions.len() {
-                combined_vertices.push(MeshVertex {
+                vertices.push(MeshVertex {
                     position: positions[vertex_index],
                     normal: normals[vertex_index],
                     uv: uvs[vertex_index],
@@ -140,33 +141,49 @@ pub fn load_gltf_scene(
                 });
             }
 
-            if let Some(material) = primitive.material().index() {
-                if let Some(handle) = material_handles.get(material) {
-                    mesh_material = *handle;
-                }
+            // Resolve this primitive's material. Falls back to the default
+            // material if the glTF doesn't specify one or if the referenced
+            // material index wasn't loaded.
+            let prim_material = primitive
+                .material()
+                .index()
+                .and_then(|i| material_handles.get(i).copied())
+                .unwrap_or(default_material);
+
+            let indices = if let Some(indices) = reader.read_indices() {
+                indices.into_u32().collect::<Vec<_>>()
+            } else {
+                (0..positions.len() as u32).collect::<Vec<_>>()
+            };
+
+            if vertices.is_empty() || indices.is_empty() {
+                // Skip empty primitives but keep loading others.
+                continue;
             }
 
-            if let Some(indices) = reader.read_indices() {
-                combined_indices.extend(indices.into_u32().map(|index| index + base_index));
+            let prim_name = if mesh.primitives().count() > 1 {
+                format!("{}_prim{prim_index}", mesh_name)
             } else {
-                combined_indices
-                    .extend((0..positions.len() as u32).map(|index| index + base_index));
-            }
+                mesh_name.clone()
+            };
+
+            primitive_handles.push(registry.insert_mesh(MeshAsset {
+                name: prim_name,
+                vertices,
+                indices,
+                material: prim_material,
+            })?);
         }
 
-        if combined_vertices.is_empty() || combined_indices.is_empty() {
+        // If all primitives were empty, emit the empty-mesh error for diagnostics.
+        if primitive_handles.is_empty() {
             return Err(AssetError::EmptyMesh {
                 path: path.to_path_buf(),
                 mesh_name,
             });
         }
 
-        mesh_handles.push(registry.insert_mesh(MeshAsset {
-            name: mesh_name,
-            vertices: combined_vertices,
-            indices: combined_indices,
-            material: mesh_material,
-        })?);
+        mesh_handles.push(primitive_handles);
     }
 
     let scene = document
@@ -178,13 +195,7 @@ pub fn load_gltf_scene(
     let mut active_camera_index = None;
 
     for node in scene.nodes() {
-        collect_node(
-            path,
-            node,
-            &mesh_handles,
-            &mut nodes,
-            &mut active_camera_index,
-        );
+        collect_node(node, &mesh_handles, &mut nodes, &mut active_camera_index);
     }
 
     Ok(ImportedScene {
@@ -195,13 +206,19 @@ pub fn load_gltf_scene(
 }
 
 fn collect_node(
-    path: &Path,
     node: gltf::Node,
-    mesh_handles: &[MeshHandle],
+    mesh_handles: &[Vec<MeshHandle>],
     nodes: &mut Vec<ImportedNode>,
     active_camera_index: &mut Option<usize>,
 ) {
     let (translation, rotation, scale) = node.transform().decomposed();
+    // Look up all primitive handles for this node's mesh (empty if no mesh or
+    // out-of-range index — the latter is logged via the `.ok()` pattern).
+    let mesh = node
+        .mesh()
+        .map(|mesh| mesh.index())
+        .and_then(|index| mesh_handles.get(index).cloned())
+        .unwrap_or_default();
     let imported = ImportedNode {
         name: node
             .name()
@@ -210,16 +227,7 @@ fn collect_node(
         translation: Vec3::from_array(translation),
         rotation: Quat::from_array(rotation),
         scale: Vec3::from_array(scale),
-        mesh: node.mesh().map(|mesh| mesh.index()).and_then(|index| {
-            mesh_handles
-                .get(index)
-                .copied()
-                .ok_or_else(|| AssetError::InvalidHandle {
-                    kind: "mesh",
-                    index: index as u32,
-                })
-                .ok()
-        }),
+        mesh,
     };
 
     if node.camera().is_some() {
@@ -229,7 +237,7 @@ fn collect_node(
     nodes.push(imported);
 
     for child in node.children() {
-        collect_node(path, child, mesh_handles, nodes, active_camera_index);
+        collect_node(child, mesh_handles, nodes, active_camera_index);
     }
 }
 
@@ -262,7 +270,7 @@ mod tests {
         assert_eq!(registry.meshes().len(), 1);
         assert_eq!(registry.textures().len(), 1);
         assert_eq!(registry.materials().len(), 2);
-        assert!(scene.nodes.iter().any(|node| node.mesh.is_some()));
+        assert!(scene.nodes.iter().any(|node| !node.mesh.is_empty()));
     }
 
     #[test]

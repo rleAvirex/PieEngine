@@ -1,7 +1,7 @@
 use glam::Vec3;
 
 use crate::assets::{AssetRegistry, MaterialAsset, MeshAsset, MeshVertex};
-use crate::components::{ActiveCamera, Camera, MeshRenderer, Name, Transform, Velocity};
+use crate::components::{ActiveCamera, Camera, DirectionalLight, MeshRenderer, Name, Transform, Velocity};
 use crate::core::{BootstrapSceneResult, SimulationCore};
 use crate::rendering::camera::look_at_camera_transform;
 
@@ -44,6 +44,12 @@ pub fn bootstrap_fallback_render_scene(
         MeshRenderer { mesh },
     ));
 
+    core.world_mut().spawn((
+        Name::new("Directional Light"),
+        DirectionalLight::default(),
+        Transform::default(),
+    ));
+
     BootstrapSceneResult { active_camera }
 }
 
@@ -63,34 +69,58 @@ pub fn fallback_cube_geometry() -> (Vec<MeshVertex>, Vec<u32>) {
     // Helper: push a quad (4 verts, 6 indices) with CCW winding.
     // Vertices are ordered: bottom-left, bottom-right, top-right, top-left
     // as seen from outside the face.
-    let mut push_quad = |bl: [f32; 3], br: [f32; 3], tr: [f32; 3], tl: [f32; 3],
-                         normal: [f32; 3], tangent: [f32; 4]| {
+    let mut push_quad = |bl: [f32; 3],
+                         br: [f32; 3],
+                         tr: [f32; 3],
+                         tl: [f32; 3],
+                         normal: [f32; 3],
+                         tangent: [f32; 4]| {
         let base = vertices.len() as u32;
         vertices.extend_from_slice(&[
-            MeshVertex { position: bl, uv: [0.0, 0.0], normal, tangent },
-            MeshVertex { position: br, uv: [1.0, 0.0], normal, tangent },
-            MeshVertex { position: tr, uv: [1.0, 1.0], normal, tangent },
-            MeshVertex { position: tl, uv: [0.0, 1.0], normal, tangent },
+            MeshVertex {
+                position: bl,
+                uv: [0.0, 0.0],
+                normal,
+                tangent,
+            },
+            MeshVertex {
+                position: br,
+                uv: [1.0, 0.0],
+                normal,
+                tangent,
+            },
+            MeshVertex {
+                position: tr,
+                uv: [1.0, 1.0],
+                normal,
+                tangent,
+            },
+            MeshVertex {
+                position: tl,
+                uv: [0.0, 1.0],
+                normal,
+                tangent,
+            },
         ]);
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     };
 
     // --- Front  (normal:  0,  0,  1, tangent: 1, 0, 0, -1) ---
     push_quad(
-        [-0.5, -0.5,  0.5], // bottom-left
-        [ 0.5, -0.5,  0.5], // bottom-right
-        [ 0.5,  0.5,  0.5], // top-right
-        [-0.5,  0.5,  0.5], // top-left
+        [-0.5, -0.5, 0.5], // bottom-left
+        [0.5, -0.5, 0.5],  // bottom-right
+        [0.5, 0.5, 0.5],   // top-right
+        [-0.5, 0.5, 0.5],  // top-left
         [0.0, 0.0, 1.0],
         [1.0, 0.0, 0.0, -1.0],
     );
 
     // --- Back  (normal:  0,  0, -1, tangent: -1, 0, 0, -1) ---
     push_quad(
-        [ 0.5, -0.5, -0.5], // bottom-left  (viewed from -Z)
+        [0.5, -0.5, -0.5],  // bottom-left  (viewed from -Z)
         [-0.5, -0.5, -0.5], // bottom-right
-        [-0.5,  0.5, -0.5], // top-right
-        [ 0.5,  0.5, -0.5], // top-left
+        [-0.5, 0.5, -0.5],  // top-right
+        [0.5, 0.5, -0.5],   // top-left
         [0.0, 0.0, -1.0],
         [-1.0, 0.0, 0.0, -1.0],
     );
@@ -100,9 +130,9 @@ pub fn fallback_cube_geometry() -> (Vec<MeshVertex>, Vec<u32>) {
     // back-face culling to hide this face from outside the cube.
     push_quad(
         [-0.5, -0.5, -0.5], // bottom-left  (viewed from -X)
-        [-0.5, -0.5,  0.5], // bottom-right
-        [-0.5,  0.5,  0.5], // top-right
-        [-0.5,  0.5, -0.5], // top-left
+        [-0.5, -0.5, 0.5],  // bottom-right
+        [-0.5, 0.5, 0.5],   // top-right
+        [-0.5, 0.5, -0.5],  // top-left
         [-1.0, 0.0, 0.0],
         [0.0, 0.0, 1.0, -1.0],
     );
@@ -111,20 +141,20 @@ pub fn fallback_cube_geometry() -> (Vec<MeshVertex>, Vec<u32>) {
     // Fixed: was wound with normal pointing -X instead of +X, causing
     // back-face culling to hide this face from outside the cube.
     push_quad(
-        [ 0.5, -0.5,  0.5], // bottom-left  (viewed from +X)
-        [ 0.5, -0.5, -0.5], // bottom-right
-        [ 0.5,  0.5, -0.5], // top-right
-        [ 0.5,  0.5,  0.5], // top-left
+        [0.5, -0.5, 0.5],  // bottom-left  (viewed from +X)
+        [0.5, -0.5, -0.5], // bottom-right
+        [0.5, 0.5, -0.5],  // top-right
+        [0.5, 0.5, 0.5],   // top-left
         [1.0, 0.0, 0.0],
         [0.0, 0.0, 1.0, -1.0],
     );
 
     // --- Top  (normal:  0,  1,  0, tangent: 1, 0, 0, -1) ---
     push_quad(
-        [-0.5,  0.5,  0.5], // bottom-left  (viewed from +Y)
-        [ 0.5,  0.5,  0.5], // bottom-right
-        [ 0.5,  0.5, -0.5], // top-right
-        [-0.5,  0.5, -0.5], // top-left
+        [-0.5, 0.5, 0.5],  // bottom-left  (viewed from +Y)
+        [0.5, 0.5, 0.5],   // bottom-right
+        [0.5, 0.5, -0.5],  // top-right
+        [-0.5, 0.5, -0.5], // top-left
         [0.0, 1.0, 0.0],
         [1.0, 0.0, 0.0, -1.0],
     );
@@ -132,9 +162,9 @@ pub fn fallback_cube_geometry() -> (Vec<MeshVertex>, Vec<u32>) {
     // --- Bottom  (normal:  0, -1,  0, tangent: 1, 0, 0, 1) ---
     push_quad(
         [-0.5, -0.5, -0.5], // bottom-left  (viewed from -Y)
-        [ 0.5, -0.5, -0.5], // bottom-right
-        [ 0.5, -0.5,  0.5], // top-right
-        [-0.5, -0.5,  0.5], // top-left
+        [0.5, -0.5, -0.5],  // bottom-right
+        [0.5, -0.5, 0.5],   // top-right
+        [-0.5, -0.5, 0.5],  // top-left
         [0.0, -1.0, 0.0],
         [1.0, 0.0, 0.0, 1.0],
     );
@@ -151,7 +181,9 @@ pub fn fallback_cube_geometry() -> (Vec<MeshVertex>, Vec<u32>) {
         assert!(
             computed.dot(stored) > 0.99,
             "face {} winding is CW from outside (computed={:?}, stored={:?})",
-            fi, computed, stored,
+            fi,
+            computed,
+            stored,
         );
     }
 

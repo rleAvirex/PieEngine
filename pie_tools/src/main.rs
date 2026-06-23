@@ -80,12 +80,8 @@ fn run_cook(input: &std::path::Path, output: &std::path::Path) -> Result<(), Str
     })?;
 
     let pak_path = output.join("assets.pak");
-    PakFile::write_to_path(&pak, &pak_path).map_err(|error| {
-        format!(
-            "failed to write pak to {}: {error}",
-            pak_path.display()
-        )
-    })?;
+    PakFile::write_to_path(&pak, &pak_path)
+        .map_err(|error| format!("failed to write pak to {}: {error}", pak_path.display()))?;
 
     println!(
         "pie_tools: cooked {} assets to {}",
@@ -129,10 +125,7 @@ fn run_build(output: &std::path::Path) -> Result<(), String> {
                 binary_dst.display()
             )
         })?;
-        println!(
-            "pie_tools: runtime binary at {}",
-            binary_dst.display()
-        );
+        println!("pie_tools: runtime binary at {}", binary_dst.display());
     } else {
         eprintln!(
             "pie_tools: warning: built binary not found at {}",
@@ -140,6 +133,9 @@ fn run_build(output: &std::path::Path) -> Result<(), String> {
         );
     }
 
-    println!("pie_tools: export complete — output at {}", output.display());
+    println!(
+        "pie_tools: export complete — output at {}",
+        output.display()
+    );
     Ok(())
 }

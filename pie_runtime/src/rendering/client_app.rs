@@ -45,7 +45,17 @@ enum ClientPhase {
     Loading,
     /// Fully initialized — rendering the scene normally.
     Running,
+    /// Scene load failed too many times — stop retrying and show the loading
+    /// screen indefinitely (so the user sees something rather than a tight
+    /// infinite-retry loop burning CPU).
+    Fatal,
 }
+
+/// Maximum number of consecutive scene-load failures before transitioning to
+/// the `Fatal` phase. Without this, a missing scene file would cause an
+/// infinite retry loop (load fails → transition_to_running returns early →
+/// next RedrawRequested → load fails again → …).
+const MAX_SCENE_LOAD_ATTEMPTS: u32 = 3;
 
 pub fn run_client_window(mut app: RuntimeApp) -> Result<(), String> {
     app.start();
@@ -61,6 +71,7 @@ pub fn run_client_window(mut app: RuntimeApp) -> Result<(), String> {
         renderer: None,
         scene: None,
         last_frame_instant: Instant::now(),
+        scene_load_attempts: 0,
     };
 
     event_loop
@@ -79,6 +90,10 @@ struct ClientApp {
     renderer: Option<Renderer>,
     scene: Option<ClientScene>,
     last_frame_instant: Instant,
+    /// Number of consecutive scene-load failures. Reset to 0 on success.
+    /// When it reaches `MAX_SCENE_LOAD_ATTEMPTS`, the phase transitions to
+    /// `Fatal` to avoid an infinite retry loop.
+    scene_load_attempts: u32,
 }
 
 impl ApplicationHandler for ClientApp {
@@ -99,8 +114,8 @@ impl ApplicationHandler for ClientApp {
 
         // Create the loading screen — this sets up the GPU and shows a
         // progress indicator immediately, before loading any scene assets.
-        let loading_screen = LoadingScreen::new(window.clone())
-            .expect("loading screen should initialize");
+        let loading_screen =
+            LoadingScreen::new(window.clone()).expect("loading screen should initialize");
 
         self.window = Some(window);
         self.loading_screen = Some(loading_screen);
@@ -164,6 +179,16 @@ impl ClientApp {
     /// Render a loading screen frame. On the first call, this transitions
     /// to the running phase after loading the scene.
     fn render_loading_frame(&mut self, event_loop: &ActiveEventLoop) {
+        // If we've already given up, just keep rendering the loading screen
+        // without re-attempting the load (avoids an infinite retry loop).
+        if self.phase == ClientPhase::Fatal {
+            if let Some(loading) = self.loading_screen.as_mut() {
+                loading.set_progress(0.0, "Scene load failed — check logs");
+                let _ = loading.render();
+            }
+            return;
+        }
+
         // Update loading screen progress
         if let Some(loading) = self.loading_screen.as_mut() {
             loading.set_progress(0.2, "Loading scene...");
@@ -197,7 +222,19 @@ impl ClientApp {
         let scene = match load_client_scene(&mut self.runtime) {
             Ok(scene) => scene,
             Err(error) => {
-                eprintln!("pie_runtime: failed to load scene: {error}");
+                self.scene_load_attempts += 1;
+                eprintln!(
+                    "pie_runtime: failed to load scene (attempt {}/{}): {error}",
+                    self.scene_load_attempts, MAX_SCENE_LOAD_ATTEMPTS
+                );
+                if self.scene_load_attempts >= MAX_SCENE_LOAD_ATTEMPTS {
+                    eprintln!(
+                        "pie_runtime: giving up after {} failed scene-load attempts; \
+                         transitioning to Fatal phase",
+                        self.scene_load_attempts
+                    );
+                    self.phase = ClientPhase::Fatal;
+                }
                 return;
             }
         };
@@ -209,21 +246,36 @@ impl ClientApp {
         }
 
         // Create the full renderer (reuses the same window)
-        let window = self.window.clone().expect("window should exist during transition");
+        let window = self
+            .window
+            .clone()
+            .expect("window should exist during transition");
         let mut renderer = match Renderer::new(window, &self.assets_root) {
             Ok(r) => r,
             Err(error) => {
-                eprintln!("pie_runtime: failed to create renderer: {error}");
+                self.scene_load_attempts += 1;
+                eprintln!(
+                    "pie_runtime: failed to create renderer (attempt {}/{}): {error}",
+                    self.scene_load_attempts, MAX_SCENE_LOAD_ATTEMPTS
+                );
+                if self.scene_load_attempts >= MAX_SCENE_LOAD_ATTEMPTS {
+                    self.phase = ClientPhase::Fatal;
+                }
                 return;
             }
         };
 
         if let Err(error) = renderer.load_scene(&scene.registry, self.runtime.simulation()) {
             eprintln!("pie_runtime: failed to load scene into renderer: {error}");
+            self.scene_load_attempts += 1;
+            if self.scene_load_attempts >= MAX_SCENE_LOAD_ATTEMPTS {
+                self.phase = ClientPhase::Fatal;
+            }
             return;
         }
 
-        // Transition complete
+        // Transition complete — reset the failure counter and switch to Running.
+        self.scene_load_attempts = 0;
         self.loading_screen = None;
         self.renderer = Some(renderer);
         self.scene = Some(scene);

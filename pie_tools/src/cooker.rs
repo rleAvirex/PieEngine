@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pie_runtime::assets::{load_gltf_scene, AssetError, AssetRegistry};
+use pie_runtime::assets::{AssetError, AssetRegistry, load_gltf_scene};
 
 use crate::pak::{CookedAssetKind, PakAsset, PakFile};
 
@@ -159,7 +159,7 @@ fn cook_gltf_scene(input_dir: &Path, assets: &mut Vec<PakAsset>) -> Result<(), C
         // vertex count: u32
         let vertex_count = mesh.vertices.len() as u32;
         data.extend_from_slice(&vertex_count.to_le_bytes());
-        // vertices: each is 32 bytes (position 12 + normal 12 + uv 8 + tangent 16)
+        // vertices: each is 48 bytes (position 12 + normal 12 + uv 8 + tangent 16)
         for vertex in &mesh.vertices {
             for component in &vertex.position {
                 data.extend_from_slice(&component.to_le_bytes());

@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use hecs::{Entity, World};
 
-use crate::components::{ActiveCamera, Camera, DirectionalLight, Name, Transform, Velocity};
+use crate::components::{ActiveCamera, Camera, DirectionalLight, Name, SkyLight, Transform, Velocity};
+use crate::profile_span;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineMode {
@@ -117,9 +118,7 @@ impl core::fmt::Debug for SimulationCore {
 
 impl SimulationCore {
     pub fn new() -> Self {
-        let mut simulation = Self::default();
-        simulation.insert_resource(DirectionalLight::default());
-        simulation
+        Self::default()
     }
 
     /// Spawns an entity with a `Transform` and `Velocity`, returning its
@@ -129,8 +128,26 @@ impl SimulationCore {
     }
 
     pub fn bootstrap_scene(&mut self) -> Entity {
-        self.world
-            .spawn((Name::new("MainCamera"), ActiveCamera, Camera::default(), Transform::default()))
+        let camera = self.world.spawn((
+            Name::new("MainCamera"),
+            ActiveCamera,
+            Camera::default(),
+            Transform::default(),
+        ));
+
+        self.world.spawn((
+            Name::new("Directional Light"),
+            DirectionalLight::default(),
+            Transform::default(),
+        ));
+
+        self.world.spawn((
+            Name::new("Sky Light"),
+            SkyLight::default(),
+            Transform::default(),
+        ));
+
+        camera
     }
 
     pub fn bootstrap_scene_with_summary(&mut self) -> BootstrapSceneResult {
@@ -184,9 +201,11 @@ impl SimulationCore {
     }
 
     pub fn run_phase(&mut self, phase: SimulationPhase, fixed_timestep_seconds: f64) {
+        profile_span!("sim_phase");
         match phase {
             SimulationPhase::PreUpdate => {}
             SimulationPhase::Update => {
+                profile_span!("sim_update_movement");
                 for (_entity, (transform, velocity)) in
                     self.world.query_mut::<(&mut Transform, &Velocity)>()
                 {
@@ -201,6 +220,7 @@ impl SimulationCore {
     /// over every entity with `Transform` and `Velocity`, then increments
     /// the frame counter.
     pub fn tick(&mut self, fixed_timestep_seconds: f64) {
+        profile_span!("sim_tick");
         for phase in SimulationPhase::ordered() {
             self.run_phase(phase, fixed_timestep_seconds);
         }
@@ -219,6 +239,9 @@ pub struct RuntimeApp {
     simulation: SimulationCore,
     running: bool,
     accumulated_time_seconds: f64,
+    frame_timing_history: crate::profiling::FrameTimingHistory,
+    #[cfg(feature = "frame-alloc")]
+    frame_allocator: crate::frame_alloc::FrameAllocator,
 }
 
 impl RuntimeApp {
@@ -234,6 +257,9 @@ impl RuntimeApp {
             simulation: SimulationCore::new(),
             running: false,
             accumulated_time_seconds: 0.0,
+            frame_timing_history: crate::profiling::FrameTimingHistory::default(),
+            #[cfg(feature = "frame-alloc")]
+            frame_allocator: crate::frame_alloc::FrameAllocator::new(),
         })
     }
 
@@ -314,6 +340,49 @@ impl RuntimeApp {
     pub fn accumulated_time_seconds(&self) -> f64 {
         self.accumulated_time_seconds
     }
+
+    /// The rolling per-frame timing history (input/sim/render/present).
+    ///
+    /// Always available — the lightweight metrics layer (M9.1) is on by design.
+    /// The editor overlay reads this for its frame-time graph; the benchmark
+    /// harness reads it for regression checks.
+    pub fn frame_timing_history(&self) -> &crate::profiling::FrameTimingHistory {
+        &self.frame_timing_history
+    }
+
+    /// Mutable access to the timing history, for loop integrators that push
+    /// per-frame samples and for tests that want to reset/inspect the buffer.
+    pub fn frame_timing_history_mut(&mut self) -> &mut crate::profiling::FrameTimingHistory {
+        &mut self.frame_timing_history
+    }
+
+    /// The per-frame transient bump allocator (M9.4). Only present when the
+    /// `frame-alloc` feature is enabled. Gameplay systems borrow this for
+    /// per-frame scratch (transient render commands, query results) instead of
+    /// hitting the global heap; the main loop resets it once per frame.
+    #[cfg(feature = "frame-alloc")]
+    pub fn frame_allocator(&self) -> &crate::frame_alloc::FrameAllocator {
+        &self.frame_allocator
+    }
+
+    /// Mutable access to the frame allocator, for systems that allocate into it.
+    #[cfg(feature = "frame-alloc")]
+    pub fn frame_allocator_mut(&mut self) -> &mut crate::frame_alloc::FrameAllocator {
+        &mut self.frame_allocator
+    }
+
+    /// Reset the frame allocator for a new frame. Called by the main loop at the
+    /// top of each iteration; also safe to call manually (e.g. in tests). No-op
+    /// when the `frame-alloc` feature is off.
+    #[cfg(feature = "frame-alloc")]
+    pub fn reset_frame_allocator(&mut self) {
+        self.frame_allocator.reset();
+    }
+
+    /// No-op when the `frame-alloc` feature is disabled, so loop code doesn't
+    /// need cfg guards at every call site.
+    #[cfg(not(feature = "frame-alloc"))]
+    pub fn reset_frame_allocator(&mut self) {}
 
     pub fn update(&mut self, delta_seconds: f64) -> u64 {
         if !self.running || delta_seconds <= 0.0 {
@@ -584,14 +653,16 @@ mod tests {
     }
 
     #[test]
-    fn simulation_core_starts_with_default_directional_light() {
-        let core = SimulationCore::new();
+    fn bootstrap_scene_spawns_directional_light_entity() {
+        let mut core = SimulationCore::new();
+        core.bootstrap_scene();
 
-        let light = core
-            .resource::<DirectionalLight>()
-            .expect("default directional light should exist");
-
-        assert!((light.direction.length() - 1.0).abs() < 1e-6);
+        let mut found = false;
+        for (_, light) in core.world().query::<&DirectionalLight>().iter() {
+            assert!((light.direction.length() - 1.0).abs() < 1e-6);
+            found = true;
+        }
+        assert!(found, "bootstrap_scene should spawn a DirectionalLight entity");
     }
 
     #[test]

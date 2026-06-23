@@ -1,11 +1,13 @@
 //! Pie Editor — a visual scene editor built on the PieEngine runtime.
 
-mod theme;
-mod gizmo;
+mod dock_layout;
 mod fly_camera;
+mod gizmo;
 mod picking;
-mod viewport_renderer;
+mod theme;
 mod ui;
+mod ui_components;
+mod viewport_renderer;
 
 use std::env;
 use std::num::NonZeroU32;
@@ -19,10 +21,9 @@ use egui_wgpu::winit::Painter;
 use egui_winit::State as EguiWinitState;
 use glam::{Vec2, Vec3};
 use hecs::Entity;
-use pie_runtime::assets::{
-    AssetRegistry, load_fbx_meshes, load_gltf_scene, spawn_imported_scene,
-};
-use pie_runtime::components::{Camera, Transform};
+use pie_runtime::assets::{AssetRegistry, load_fbx_meshes, load_gltf_scene, spawn_imported_scene};
+use pie_runtime::components::{Camera, DirectionalLight, Name, SkyLight, Transform};
+use ui::SpawnableEntity;
 use pie_runtime::core::RuntimeApp;
 use pie_runtime::init_logging;
 use pie_runtime::rendering::camera_view_proj;
@@ -33,10 +34,16 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window as WinitWindow, WindowId};
 
 use fly_camera::{EditorCamera, SPEED_SCROLL_FACTOR};
-use gizmo::{Axis, GizmoState, PickResult, GIZMO_WORLD_SCALE, gizmo_center_aabb, gizmo_shaft_aabb, gizmo_tip_aabb};
-use picking::{PickableBounds, ray_aabb_hit, world_aabb, screen_ray_from_ndc, viewport_ndc_from_rect};
-use viewport_renderer::{EditorViewportRenderer, EditorViewportTexture};
+use gizmo::{
+    Axis, GIZMO_WORLD_SCALE, GizmoState, PickResult, gizmo_center_aabb, gizmo_shaft_aabb,
+    gizmo_tip_aabb,
+};
+use picking::{
+    PickableBounds, ray_aabb_hit, screen_ray_from_ndc, viewport_ndc_from_rect, world_aabb,
+};
+use dock_layout::DockState;
 use ui::{EditorCommands, EditorSceneInfo, EditorUiParams, build_editor_ui};
+use viewport_renderer::{EditorViewportRenderer, EditorViewportTexture};
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -146,6 +153,13 @@ impl EditorScene {
         match load_gltf_scene(&scene_path, &mut registry) {
             Ok(imported) => {
                 spawn_imported_scene(runtime.simulation_mut(), &imported);
+                // Spawn a default directional light so the scene is always lit
+                // and the light appears as an editable object in the outliner.
+                runtime.simulation_mut().world_mut().spawn((
+                    pie_runtime::components::Name::new("Directional Light"),
+                    pie_runtime::components::DirectionalLight::default(),
+                    pie_runtime::components::Transform::default(),
+                ));
             }
             Err(error) => {
                 eprintln!(
@@ -233,18 +247,13 @@ struct EditorApp {
     gizmo_state: GizmoState,
     hovered_axis: Option<Axis>,
     hovered_center: bool,
+    dock_state: DockState,
 }
 
 impl EditorApp {
     fn new(mut runtime: RuntimeApp, launch: EditorLaunch) -> Self {
         let scene = EditorScene::load(&mut runtime);
-        let selected_entity = runtime
-            .simulation()
-            .world()
-            .query::<&Transform>()
-            .iter()
-            .map(|(entity, _)| entity)
-            .next();
+        let selected_entity = None;
 
         if let Some(step_count) = launch.step_count {
             for _ in 0..step_count {
@@ -278,6 +287,7 @@ impl EditorApp {
             gizmo_state: GizmoState::default(),
             hovered_axis: None,
             hovered_center: false,
+            dock_state: DockState::default(),
         }
     }
 
@@ -333,16 +343,45 @@ impl EditorApp {
             Self::init_camera_and_pickables(&self.runtime, &self.scene);
         self.editor_camera = editor_camera;
         self.pickables = pickables;
-        self.selected_entity = self
-            .runtime
-            .simulation()
-            .world()
-            .query::<&Transform>()
-            .iter()
-            .map(|(entity, _)| entity)
-            .next();
+        self.selected_entity = None;
         self.runtime.pause();
         self.request_redraw();
+    }
+
+    /// Spawn a new entity of the given type into the simulation world.
+    fn spawn_entity(runtime: &mut RuntimeApp, entity_type: SpawnableEntity) -> Entity {
+        let world = runtime.simulation_mut().world_mut();
+
+        // Default spawn position — at the origin. Could be extended to spawn
+        // at the camera position or on a surface under the cursor.
+        let transform = Transform::default();
+
+        match entity_type {
+            SpawnableEntity::Empty => {
+                world.spawn((Name::new("Empty"), transform))
+            }
+            SpawnableEntity::Camera => {
+                world.spawn((
+                    Name::new("Camera"),
+                    Camera::default(),
+                    transform,
+                ))
+            }
+            SpawnableEntity::DirectionalLight => {
+                world.spawn((
+                    Name::new("Directional Light"),
+                    DirectionalLight::default(),
+                    transform,
+                ))
+            }
+            SpawnableEntity::SkyLight => {
+                world.spawn((
+                    Name::new("Sky Light"),
+                    SkyLight::default(),
+                    transform,
+                ))
+            }
+        }
     }
 
     fn ensure_viewport_renderer(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -501,11 +540,11 @@ impl EditorApp {
             if let Ok(mesh) = scene.registry.mesh(mesh_renderer.mesh)
                 && let Some((local_min, local_max)) = mesh.local_aabb()
             {
-                    pickables.push(PickableBounds {
-                        entity,
-                        local_min,
-                        local_max,
-                    });
+                pickables.push(PickableBounds {
+                    entity,
+                    local_min,
+                    local_max,
+                });
             }
         }
 
@@ -557,13 +596,11 @@ impl EditorApp {
 
             // Axis shafts and tips
             for axis in Axis::ALL {
-                let (shaft_min, shaft_max) =
-                    gizmo_shaft_aabb(origin, axis, GIZMO_WORLD_SCALE);
+                let (shaft_min, shaft_max) = gizmo_shaft_aabb(origin, axis, GIZMO_WORLD_SCALE);
                 if ray_aabb_hit(ray_origin, ray_dir, shaft_min, shaft_max).is_some() {
                     return Some(PickResult::GizmoAxis(axis));
                 }
-                let (tip_min, tip_max) =
-                    gizmo_tip_aabb(origin, axis, GIZMO_WORLD_SCALE);
+                let (tip_min, tip_max) = gizmo_tip_aabb(origin, axis, GIZMO_WORLD_SCALE);
                 if ray_aabb_hit(ray_origin, ray_dir, tip_min, tip_max).is_some() {
                     return Some(PickResult::GizmoAxis(axis));
                 }
@@ -589,8 +626,8 @@ impl EditorApp {
             if let Some(t) = ray_aabb_hit(ray_origin, ray_dir, world_min, world_max)
                 && t < best_t
             {
-                    best_t = t;
-                    best_result = Some(PickResult::Entity(pickable.entity));
+                best_t = t;
+                best_result = Some(PickResult::Entity(pickable.entity));
             }
         }
 
@@ -633,8 +670,35 @@ impl EditorApp {
     }
 
     fn apply_camera_to_runtime(&mut self) {
+        let camera_entity = self.runtime.simulation().active_camera();
+
+        // If the user has the active camera selected and is editing its
+        // transform via the inspector, sync `editor_camera` from the entity
+        // (the inspector wrote there directly) instead of overwriting the
+        // entity from `editor_camera`. Otherwise the inspector's edits are
+        // silently reverted every frame.
+        let editing_active_camera = self
+            .selected_entity
+            .map(|e| Some(e) == camera_entity)
+            .unwrap_or(false);
+
+        if editing_active_camera {
+            if let Some(entity) = camera_entity {
+                if let Ok(transform) = self
+                    .runtime
+                    .simulation()
+                    .world()
+                    .get::<&Transform>(entity)
+                {
+                    self.editor_camera = EditorCamera::from_transform(*transform);
+                }
+            }
+            return;
+        }
+
+        // Otherwise, push the fly-camera state into the world.
         let transform = self.editor_camera.into_transform();
-        if let Some(camera_entity) = self.runtime.simulation().active_camera() {
+        if let Some(camera_entity) = camera_entity {
             let _ = self
                 .runtime
                 .simulation_mut()
@@ -677,7 +741,7 @@ impl ApplicationHandler for EditorApp {
         if let Some(egui_state) = self.egui_state.as_mut()
             && egui_state.on_window_event(window.as_ref(), &event).repaint
         {
-                needs_redraw = true;
+            needs_redraw = true;
         }
 
         match event {
@@ -689,7 +753,7 @@ impl ApplicationHandler for EditorApp {
                     && let (Some(width), Some(height)) =
                         (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
                 {
-                        painter.on_window_resized(ViewportId::ROOT, width, height);
+                    painter.on_window_resized(ViewportId::ROOT, width, height);
                 }
                 needs_redraw = true;
             }
@@ -743,10 +807,16 @@ impl ApplicationHandler for EditorApp {
                         smoothed_delta,
                         cam_pos,
                         cam_speed,
+                        dock: &mut self.dock_state,
                     });
                 });
                 self.selected_entity = selected_entity;
                 self.viewport_hovered = commands.viewport_hovered;
+
+                // Apply dock layout commands
+                for cmd in self.dock_state.drain_cmds() {
+                    self.dock_state.apply_cmd(cmd);
+                }
 
                 if let Some(egui_state) = self.egui_state.as_mut() {
                     egui_state.handle_platform_output(window.as_ref(), full_output.platform_output);
@@ -776,12 +846,13 @@ impl ApplicationHandler for EditorApp {
 
                 // WASD movement — only while the right mouse button is held
                 // so that camera control doesn't interfere with other input.
-                let right_mouse_held = egui_ctx.input(|i| {
-                    i.pointer.button_down(egui::PointerButton::Secondary)
-                });
+                let right_mouse_held =
+                    egui_ctx.input(|i| i.pointer.button_down(egui::PointerButton::Secondary));
                 if right_mouse_held {
                     let egui_ctx_ref = &egui_ctx;
-                    let forward = if egui_ctx_ref.input(|i| i.key_pressed(Key::W)) || egui_ctx_ref.input(|i| i.key_down(Key::W)) {
+                    let forward = if egui_ctx_ref.input(|i| i.key_pressed(Key::W))
+                        || egui_ctx_ref.input(|i| i.key_down(Key::W))
+                    {
                         1.0
                     } else if egui_ctx_ref.input(|i| i.key_down(Key::S)) {
                         -1.0
@@ -802,10 +873,8 @@ impl ApplicationHandler for EditorApp {
                     } else {
                         0.0
                     };
-                    self.editor_camera.apply_movement(
-                        Vec3::new(forward, right, up),
-                        delta_seconds as f32,
-                    );
+                    self.editor_camera
+                        .apply_movement(Vec3::new(forward, right, up), delta_seconds as f32);
                     if forward != 0.0 || right != 0.0 || up != 0.0 {
                         needs_redraw = true;
                     }
@@ -814,7 +883,12 @@ impl ApplicationHandler for EditorApp {
                 self.apply_camera_to_runtime();
 
                 // ---- Gizmo drag update: axis translation ----
-                if let GizmoState::Dragging { axis, entity_start_pos, total_world_delta } = self.gizmo_state {
+                if let GizmoState::Dragging {
+                    axis,
+                    entity_start_pos,
+                    total_world_delta,
+                } = self.gizmo_state
+                {
                     if let Some((dx, dy)) = commands.gizmo_drag_delta {
                         let cam_transform = self
                             .runtime
@@ -840,9 +914,8 @@ impl ApplicationHandler for EditorApp {
                         // Compute world units per pixel at the object's distance.
                         // This makes the object move 1:1 with the mouse cursor.
                         let dist = (cam_transform.translation - entity_start_pos).length();
-                        let viewport_h = commands.viewport_rect
-                            .map(|r| r.height())
-                            .unwrap_or(900.0);
+                        let viewport_h =
+                            commands.viewport_rect.map(|r| r.height()).unwrap_or(900.0);
                         let fov = self
                             .runtime
                             .simulation()
@@ -887,7 +960,11 @@ impl ApplicationHandler for EditorApp {
                 }
 
                 // ---- Gizmo drag update: uniform scaling ----
-                if let GizmoState::UniformScaling { entity_start_scale, total_scale_delta } = self.gizmo_state {
+                if let GizmoState::UniformScaling {
+                    entity_start_scale,
+                    total_scale_delta,
+                } = self.gizmo_state
+                {
                     if let Some((_, dy)) = commands.gizmo_drag_delta {
                         // Drag up (negative dy in screen) → scale up.
                         let scale_speed = 0.004;
@@ -926,16 +1003,16 @@ impl ApplicationHandler for EditorApp {
                     && !self.gizmo_state.is_active()
                     && let Some(ndc) = viewport_ndc_from_rect(rect, hover_pos)
                 {
-                        let gizmo_origin = self.gizmo_origin();
-                        match self.pick_viewport(ndc, (rect.width(), rect.height()), gizmo_origin) {
-                            Some(PickResult::GizmoAxis(axis)) => {
-                                self.hovered_axis = Some(axis);
-                            }
-                            Some(PickResult::GizmoCenter) => {
-                                self.hovered_center = true;
-                            }
-                            Some(PickResult::Entity(_)) | None => {}
+                    let gizmo_origin = self.gizmo_origin();
+                    match self.pick_viewport(ndc, (rect.width(), rect.height()), gizmo_origin) {
+                        Some(PickResult::GizmoAxis(axis)) => {
+                            self.hovered_axis = Some(axis);
                         }
+                        Some(PickResult::GizmoCenter) => {
+                            self.hovered_center = true;
+                        }
+                        Some(PickResult::Entity(_)) | None => {}
+                    }
                 }
                 // While dragging, keep the dragged element highlighted.
                 if let Some(axis) = self.gizmo_state.dragged_axis() {
@@ -952,41 +1029,35 @@ impl ApplicationHandler for EditorApp {
                     && let Some(drag_start_pos) = commands.viewport_primary_drag_start_pos
                     && let Some(ndc) = viewport_ndc_from_rect(rect, drag_start_pos)
                 {
-                        let gizmo_origin = self.gizmo_origin();
-                        match self.pick_viewport(ndc, (rect.width(), rect.height()), gizmo_origin) {
-                            Some(PickResult::GizmoAxis(axis)) => {
-                                if let Some(entity) = self.selected_entity
-                                    && let Ok(transform) = self
-                                        .runtime
-                                        .simulation()
-                                        .world()
-                                        .get::<&Transform>(entity)
-                                {
-                                        self.gizmo_state = GizmoState::Dragging {
-                                            axis,
-                                            entity_start_pos: transform.translation,
-                                            total_world_delta: 0.0,
-                                        };
-                                        needs_redraw = true;
-                                }
+                    let gizmo_origin = self.gizmo_origin();
+                    match self.pick_viewport(ndc, (rect.width(), rect.height()), gizmo_origin) {
+                        Some(PickResult::GizmoAxis(axis)) => {
+                            if let Some(entity) = self.selected_entity
+                                && let Ok(transform) =
+                                    self.runtime.simulation().world().get::<&Transform>(entity)
+                            {
+                                self.gizmo_state = GizmoState::Dragging {
+                                    axis,
+                                    entity_start_pos: transform.translation,
+                                    total_world_delta: 0.0,
+                                };
+                                needs_redraw = true;
                             }
-                            Some(PickResult::GizmoCenter) => {
-                                if let Some(entity) = self.selected_entity
-                                    && let Ok(transform) = self
-                                        .runtime
-                                        .simulation()
-                                        .world()
-                                        .get::<&Transform>(entity)
-                                {
-                                        self.gizmo_state = GizmoState::UniformScaling {
-                                            entity_start_scale: transform.scale,
-                                            total_scale_delta: 0.0,
-                                        };
-                                        needs_redraw = true;
-                                }
-                            }
-                            Some(PickResult::Entity(_)) | None => {}
                         }
+                        Some(PickResult::GizmoCenter) => {
+                            if let Some(entity) = self.selected_entity
+                                && let Ok(transform) =
+                                    self.runtime.simulation().world().get::<&Transform>(entity)
+                            {
+                                self.gizmo_state = GizmoState::UniformScaling {
+                                    entity_start_scale: transform.scale,
+                                    total_scale_delta: 0.0,
+                                };
+                                needs_redraw = true;
+                            }
+                        }
+                        Some(PickResult::Entity(_)) | None => {}
+                    }
                 }
 
                 // ---- Viewport picking: entity selection (on click-release) ----
@@ -995,23 +1066,26 @@ impl ApplicationHandler for EditorApp {
                     && !self.gizmo_state.is_active()
                     && let Some(ndc) = viewport_ndc_from_rect(rect, click_pos)
                 {
-                        let gizmo_origin = self.gizmo_origin();
-                        match self.pick_viewport(ndc, (rect.width(), rect.height()), gizmo_origin) {
-                            Some(PickResult::Entity(entity)) => {
-                                self.selected_entity = Some(entity);
-                                needs_redraw = true;
-                            }
-                            Some(PickResult::GizmoAxis(_)) | Some(PickResult::GizmoCenter) => {
-                                // Handled above via drag-start.
-                            }
-                            None => {}
+                    let gizmo_origin = self.gizmo_origin();
+                    match self.pick_viewport(ndc, (rect.width(), rect.height()), gizmo_origin) {
+                        Some(PickResult::Entity(entity)) => {
+                            self.selected_entity = Some(entity);
+                            needs_redraw = true;
                         }
+                        Some(PickResult::GizmoAxis(_)) | Some(PickResult::GizmoCenter) => {
+                            // Handled above via drag-start.
+                        }
+                        None => {
+                            self.selected_entity = None;
+                            needs_redraw = true;
+                        }
+                    }
                 }
 
                 if let Some(viewport_size) = commands.viewport_size
                     && let Err(error) = self.ensure_viewport_texture(viewport_size)
                 {
-                        eprintln!("pie_editor: failed to resize viewport texture: {error}");
+                    eprintln!("pie_editor: failed to resize viewport texture: {error}");
                 }
 
                 self.render_viewport();
@@ -1032,6 +1106,12 @@ impl ApplicationHandler for EditorApp {
 
                 if commands.reload_scene {
                     self.load_scene();
+                    needs_redraw = true;
+                }
+
+                if let Some(entity_type) = commands.spawn_entity {
+                    let entity = Self::spawn_entity(&mut self.runtime, entity_type);
+                    eprintln!("[editor] Spawned {:?} entity: {:?}", entity_type, entity);
                     needs_redraw = true;
                 }
 

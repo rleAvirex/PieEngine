@@ -30,20 +30,25 @@ pub fn spawn_imported_scene(core: &mut SimulationCore, imported: &ImportedScene)
     let mut mesh_entities = Vec::new();
 
     for node in &imported.nodes {
-        let Some(mesh) = node.mesh else {
+        // Spawn one entity per mesh primitive so each gets its own material.
+        // (Multi-primitive glTF meshes use different materials per primitive;
+        // merging them into a single entity would silently lose materials.)
+        if node.mesh.is_empty() {
             continue;
-        };
+        }
 
-        let entity = core.world_mut().spawn((
-            Name::new(node.name.clone()),
-            Transform {
-                translation: node.translation,
-                rotation: node.rotation,
-                scale: node.scale,
-            },
-            MeshRenderer { mesh },
-        ));
-        mesh_entities.push(entity);
+        for prim_handle in &node.mesh {
+            let entity = core.world_mut().spawn((
+                Name::new(node.name.clone()),
+                Transform {
+                    translation: node.translation,
+                    rotation: node.rotation,
+                    scale: node.scale,
+                },
+                MeshRenderer { mesh: *prim_handle },
+            ));
+            mesh_entities.push(entity);
+        }
     }
 
     let active_camera = if let Some(camera_index) = imported.active_camera_index {

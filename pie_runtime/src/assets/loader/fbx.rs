@@ -13,8 +13,8 @@
 use std::path::Path;
 
 use crate::assets::error::AssetError;
-use crate::assets::handle::MeshHandle;
 use crate::assets::handle::MaterialHandle;
+use crate::assets::handle::MeshHandle;
 use crate::assets::material::MaterialAsset;
 use crate::assets::mesh::{MeshAsset, MeshVertex};
 use crate::assets::registry::AssetRegistry;
@@ -47,9 +47,13 @@ pub fn load_fbx_meshes(
 
     let mut handles = Vec::with_capacity(geometries.len());
     for (index, geo) in geometries.into_iter().enumerate() {
-        let mesh_name = format!("{}_geo{}", path.file_stem().unwrap_or_default().to_string_lossy(), index);
+        let mesh_name = format!(
+            "{}_geo{}",
+            path.file_stem().unwrap_or_default().to_string_lossy(),
+            index
+        );
         let material = registry.insert_material(MaterialAsset::pbr(
-            &format!("{mesh_name}_mat"),
+            format!("{mesh_name}_mat"),
             [1.0, 1.0, 1.0, 1.0],
             0.0,
             1.0,
@@ -64,15 +68,17 @@ pub fn load_fbx_meshes(
 
 /// Load the first mesh from an FBX file. Convenience wrapper for files
 /// that contain a single geometry.
-pub fn load_fbx_mesh(
-    path: &Path,
-    registry: &mut AssetRegistry,
-) -> Result<MeshHandle, AssetError> {
+pub fn load_fbx_mesh(path: &Path, registry: &mut AssetRegistry) -> Result<MeshHandle, AssetError> {
     let handles = load_fbx_meshes(path, registry)?;
-    handles
-        .into_iter()
-        .next()
-        .ok_or_else(|| AssetError::io(path, std::io::Error::new(std::io::ErrorKind::InvalidData, "FBX file contains no geometry")))
+    handles.into_iter().next().ok_or_else(|| {
+        AssetError::io(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "FBX file contains no geometry",
+            ),
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -96,26 +102,36 @@ struct FbxGeometry {
 fn parse_fbx_geometries(data: &[u8], path: &Path) -> Result<Vec<FbxGeometry>, AssetError> {
     // Validate header (27 bytes: 21 magic + 4 version + 2 reserved)
     if data.len() < 27 {
-        return Err(AssetError::io(path, std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "FBX file too short",
-        )));
+        return Err(AssetError::io(
+            path,
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "FBX file too short"),
+        ));
     }
 
     if &data[0..FBX_MAGIC.len()] != FBX_MAGIC {
-        return Err(AssetError::io(path, std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("invalid FBX magic: expected 'Kaydara FBX Binary', got {:?}", &data[0..FBX_MAGIC.len().min(data.len())]),
-        )));
+        return Err(AssetError::io(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "invalid FBX magic: expected 'Kaydara FBX Binary', got {:?}",
+                    &data[0..FBX_MAGIC.len().min(data.len())]
+                ),
+            ),
+        ));
     }
 
     let version_offset = FBX_MAGIC.len(); // 21
-    let _version = u32::from_le_bytes(data[version_offset..version_offset + 4].try_into().unwrap());
+    let version = u32::from_le_bytes(data[version_offset..version_offset + 4].try_into().unwrap());
 
     // The FBX 7.x binary header is 27 bytes: 21-byte magic + 4-byte version + 2 reserved bytes.
     // Records begin immediately after the header.
     let records_start = 27;
-    let records = parse_records(data, records_start, data.len(), path)?;
+    // FBX 7.5 (version 7500+) switched record header fields from u32 to u64
+    // (end_offset, num_props, prop_list_len), making each record header 25
+    // bytes instead of 13. Older versions (7.1–7.4) use 13-byte headers.
+    let header_is_64bit = version >= 7500;
+    let records = parse_records(data, records_start, data.len(), header_is_64bit, path)?;
 
     // Extract geometries from the record tree
     let mut geometries = Vec::new();
@@ -142,35 +158,53 @@ enum FbxProperty {
 }
 
 /// Recursively parse FBX binary records.
+///
+/// `header_is_64bit` selects between FBX 7.1–7.4 (32-bit header fields,
+/// 13-byte header) and FBX 7.5+ (64-bit header fields, 25-byte header).
 fn parse_records(
     data: &[u8],
     mut offset: usize,
     end: usize,
+    header_is_64bit: bool,
     path: &Path,
 ) -> Result<Vec<FbxRecord>, AssetError> {
     let mut records = Vec::new();
 
-    while offset < end.saturating_sub(13) {
-        // Record header: end_offset (4) + num_props (4) + prop_list_len (4) + name_len (1)
-        if offset + 13 > end {
-            break;
-        }
+    // Header size: 4+4+4+1 = 13 bytes for 7.1–7.4; 8+8+8+1 = 25 bytes for 7.5+.
+    let header_size = if header_is_64bit { 25 } else { 13 };
 
-        let rec_end = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-        let num_props = u32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap()) as usize;
-        let _prop_list_len = u32::from_le_bytes(data[offset + 8..offset + 12].try_into().unwrap()) as usize;
-        let name_len = data[offset + 12] as usize;
+    while offset < end.saturating_sub(header_size) {
+        // Record header: end_offset + num_props + prop_list_len + name_len(1)
+        let (rec_end, num_props, _prop_list_len, name_len) = if header_is_64bit {
+            let rec_end = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap()) as usize;
+            let num_props = u64::from_le_bytes(data[offset + 8..offset + 16].try_into().unwrap())
+                as usize;
+            let prop_list_len =
+                u64::from_le_bytes(data[offset + 16..offset + 24].try_into().unwrap()) as usize;
+            let name_len = data[offset + 24] as usize;
+            (rec_end, num_props, prop_list_len, name_len)
+        } else {
+            let rec_end = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+            let num_props =
+                u32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap()) as usize;
+            let prop_list_len =
+                u32::from_le_bytes(data[offset + 8..offset + 12].try_into().unwrap()) as usize;
+            let name_len = data[offset + 12] as usize;
+            (rec_end, num_props, prop_list_len, name_len)
+        };
 
         if rec_end == 0 || rec_end > end {
             break;
         }
 
-        if offset + 13 + name_len > rec_end {
+        if offset + header_size + name_len > rec_end {
             break;
         }
 
-        let name = String::from_utf8_lossy(&data[offset + 13..offset + 13 + name_len]).to_string();
-        let mut prop_offset = offset + 13 + name_len;
+        let name =
+            String::from_utf8_lossy(&data[offset + header_size..offset + header_size + name_len])
+                .to_string();
+        let mut prop_offset = offset + header_size + name_len;
 
         // Parse properties
         let mut properties = Vec::with_capacity(num_props);
@@ -182,12 +216,30 @@ fn parse_records(
             prop_offset += 1;
 
             match ptype {
-                'Y' => { prop_offset += 2; properties.push(FbxProperty::Other); }
-                'C' => { prop_offset += 1; properties.push(FbxProperty::Other); }
-                'I' => { prop_offset += 4; properties.push(FbxProperty::Other); }
-                'F' => { prop_offset += 4; properties.push(FbxProperty::Other); }
-                'D' => { prop_offset += 8; properties.push(FbxProperty::Other); }
-                'L' => { prop_offset += 8; properties.push(FbxProperty::Other); }
+                'Y' => {
+                    prop_offset += 2;
+                    properties.push(FbxProperty::Other);
+                }
+                'C' => {
+                    prop_offset += 1;
+                    properties.push(FbxProperty::Other);
+                }
+                'I' => {
+                    prop_offset += 4;
+                    properties.push(FbxProperty::Other);
+                }
+                'F' => {
+                    prop_offset += 4;
+                    properties.push(FbxProperty::Other);
+                }
+                'D' => {
+                    prop_offset += 8;
+                    properties.push(FbxProperty::Other);
+                }
+                'L' => {
+                    prop_offset += 8;
+                    properties.push(FbxProperty::Other);
+                }
                 'f' => {
                     let (arr, new_off) = parse_array_f32(data, prop_offset, rec_end, path)?;
                     prop_offset = new_off;
@@ -217,7 +269,9 @@ fn parse_records(
                     if prop_offset + 4 > rec_end {
                         break;
                     }
-                    let slen = u32::from_le_bytes(data[prop_offset..prop_offset + 4].try_into().unwrap()) as usize;
+                    let slen =
+                        u32::from_le_bytes(data[prop_offset..prop_offset + 4].try_into().unwrap())
+                            as usize;
                     prop_offset += 4;
                     if prop_offset + slen > rec_end {
                         break;
@@ -230,7 +284,9 @@ fn parse_records(
                     if prop_offset + 4 > rec_end {
                         break;
                     }
-                    let rlen = u32::from_le_bytes(data[prop_offset..prop_offset + 4].try_into().unwrap()) as usize;
+                    let rlen =
+                        u32::from_le_bytes(data[prop_offset..prop_offset + 4].try_into().unwrap())
+                            as usize;
                     prop_offset += 4 + rlen;
                     properties.push(FbxProperty::Other);
                 }
@@ -240,7 +296,7 @@ fn parse_records(
 
         // Recursively parse child records
         let children = if prop_offset < rec_end {
-            parse_records(data, prop_offset, rec_end, path)?
+            parse_records(data, prop_offset, rec_end, header_is_64bit, path)?
         } else {
             Vec::new()
         };
@@ -327,7 +383,9 @@ fn skip_array(
     elem_size: usize,
     path: &Path,
 ) -> Result<usize, AssetError> {
-    let (_val, new_off) = parse_typed_array(data, offset, usize::MAX, path, elem_size, |_| Vec::<u8>::new())?;
+    let (_val, new_off) = parse_typed_array(data, offset, usize::MAX, path, elem_size, |_| {
+        Vec::<u8>::new()
+    })?;
     Ok(new_off)
 }
 
@@ -346,7 +404,10 @@ fn parse_typed_array<T>(
     if offset + 8 > end {
         return Err(AssetError::io(
             path,
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "FBX array header truncated"),
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "FBX array header truncated",
+            ),
         ));
     }
 
@@ -360,7 +421,10 @@ fn parse_typed_array<T>(
         if pos + byte_count > data.len() {
             return Err(AssetError::io(
                 path,
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "FBX uncompressed array truncated"),
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "FBX uncompressed array truncated",
+                ),
             ));
         }
         let result = decode(&data[pos..pos + byte_count]);
@@ -371,7 +435,10 @@ fn parse_typed_array<T>(
         if pos + 4 > data.len() {
             return Err(AssetError::io(
                 path,
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "FBX compressed array header truncated"),
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "FBX compressed array header truncated",
+                ),
             ));
         }
         let compressed_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
@@ -380,7 +447,10 @@ fn parse_typed_array<T>(
         if pos + compressed_len > data.len() {
             return Err(AssetError::io(
                 path,
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "FBX compressed array data truncated"),
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "FBX compressed array data truncated",
+                ),
             ));
         }
 
@@ -407,10 +477,10 @@ fn extract_geometries(
     path: &Path,
 ) -> Result<(), AssetError> {
     for record in records {
-        if record.name == "Geometry" {
-            if let Some(geo) = extract_geometry(record, path)? {
-                geometries.push(geo);
-            }
+        if record.name == "Geometry"
+            && let Some(geo) = extract_geometry(record, path)?
+        {
+            geometries.push(geo);
         }
         // Recurse into non-Geometry children too
         extract_geometries(&record.children, geometries, path)?;
@@ -427,19 +497,19 @@ fn extract_geometry(record: &FbxRecord, _path: &Path) -> Result<Option<FbxGeomet
         match child.name.as_str() {
             "Vertices" => {
                 for prop in &child.properties {
-                    if let FbxProperty::DoubleArray(arr) = prop {
-                        if arr.len() >= 9 {
-                            positions = Some(arr.clone());
-                        }
+                    if let FbxProperty::DoubleArray(arr) = prop
+                        && arr.len() >= 9
+                    {
+                        positions = Some(arr.clone());
                     }
                 }
             }
             "PolygonVertexIndex" => {
                 for prop in &child.properties {
-                    if let FbxProperty::IntArray(arr) = prop {
-                        if arr.len() >= 3 {
-                            raw_indices = Some(arr.clone());
-                        }
+                    if let FbxProperty::IntArray(arr) = prop
+                        && arr.len() >= 3
+                    {
+                        raw_indices = Some(arr.clone());
                     }
                 }
             }
@@ -448,15 +518,15 @@ fn extract_geometry(record: &FbxRecord, _path: &Path) -> Result<Option<FbxGeomet
                 for sub in &child.children {
                     if sub.name == "Normals" {
                         for prop in &sub.properties {
-                            if let FbxProperty::DoubleArray(arr) = prop {
-                                if arr.len() >= 3 {
-                                    normals = Some(arr.iter().map(|&v| v as f32).collect());
-                                }
+                            if let FbxProperty::DoubleArray(arr) = prop
+                                && arr.len() >= 3
+                            {
+                                normals = Some(arr.iter().map(|&v| v as f32).collect());
                             }
-                            if let FbxProperty::FloatArray(arr) = prop {
-                                if arr.len() >= 3 {
-                                    normals = Some(arr.clone());
-                                }
+                            if let FbxProperty::FloatArray(arr) = prop
+                                && arr.len() >= 3
+                            {
+                                normals = Some(arr.clone());
                             }
                         }
                     }
@@ -536,7 +606,12 @@ fn polygon_indices_to_triangles(raw_indices: &[i32]) -> Vec<u32> {
 
     for &idx in raw_indices {
         if idx < 0 {
-            polygon.push((-idx - 1) as u32);
+            // FBX encodes the last vertex of a polygon as -(real_index + 1).
+            // Guard against i32::MIN (malformed FBX) which would overflow
+            // `-idx - 1` when computed naively; use wrapping arithmetic and
+            // then cast to u32.
+            let real_idx = (-idx).wrapping_sub(1) as u32;
+            polygon.push(real_idx);
         } else {
             polygon.push(idx as u32);
         }
@@ -585,7 +660,7 @@ fn build_mesh_asset(
         Vec::new()
     };
 
-    let normals_ref: &[[f32; 3]] = geo.normals.as_ref().map(|n| n.as_slice()).unwrap_or(&computed_normals);
+    let normals_ref: &[[f32; 3]] = geo.normals.as_deref().unwrap_or(&computed_normals);
 
     for i in 0..num_vertices {
         let pos = geo.positions[i];
@@ -626,9 +701,15 @@ fn compute_flat_normals(positions: &[[f32; 3]], triangles: &[u32]) -> Vec<[f32; 
         let face_normal = (p1 - p0).cross(p2 - p0);
         if face_normal.length_squared() > 0.0 {
             let n = face_normal.normalize();
-            normals[i0][0] += n.x; normals[i0][1] += n.y; normals[i0][2] += n.z;
-            normals[i1][0] += n.x; normals[i1][1] += n.y; normals[i1][2] += n.z;
-            normals[i2][0] += n.x; normals[i2][1] += n.y; normals[i2][2] += n.z;
+            normals[i0][0] += n.x;
+            normals[i0][1] += n.y;
+            normals[i0][2] += n.z;
+            normals[i1][0] += n.x;
+            normals[i1][1] += n.y;
+            normals[i1][2] += n.z;
+            normals[i2][0] += n.x;
+            normals[i2][1] += n.y;
+            normals[i2][2] += n.z;
         }
     }
 
@@ -690,18 +771,17 @@ mod tests {
 
     #[test]
     fn compute_flat_normals_produces_valid_normals() {
-        let positions = vec![
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-        ];
+        let positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
         let triangles = vec![0, 1, 2];
         let normals = compute_flat_normals(&positions, &triangles);
 
         // All normals should point in +Z for a CCW triangle in the XY plane
         for normal in &normals {
             let n = glam::Vec3::from(*normal);
-            assert!((n.length() - 1.0).abs() < 0.001, "normal should be unit length");
+            assert!(
+                (n.length() - 1.0).abs() < 0.001,
+                "normal should be unit length"
+            );
             assert!(n.z > 0.9, "normal should point in +Z, got {:?}", n);
         }
     }
@@ -712,7 +792,10 @@ mod tests {
             .join("../assets/Engine/Gizmos/GizmosSphere.fbx");
 
         if !path.exists() {
-            eprintln!("Skipping FBX test; GizmosSphere.fbx not found at {}", path.display());
+            eprintln!(
+                "Skipping FBX test; GizmosSphere.fbx not found at {}",
+                path.display()
+            );
             return;
         }
 

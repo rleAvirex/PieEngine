@@ -17,6 +17,14 @@ This document turns the project brief into a practical execution plan for buildi
 - Add instrumentation and benchmarks early so performance decisions are evidence-based
 - Treat determinism and shipping constraints as architecture requirements, not polish
 
+## Source of truth for status
+
+**`pie-engine-v1-checklist.md` is the canonical source of truth for item-level v1
+completion status.** The per-milestone "Status" blocks below are summaries that
+reference the checklist; they must not contradict it. When the two disagree, the
+checklist wins and this document is the one that gets fixed. Doc drift is treated
+as a bug, not a backlog item.
+
 ## Milestone 0: Workspace foundation
 
 ### Goal
@@ -226,13 +234,28 @@ Create the path from editable source assets to shippable builds.
 
 ### Status
 
-- complete
-- `pie_tools` CLI with `cook` and `export` commands (clap-based)
-- `.pak` binary format: header + type-tagged asset entries (mesh, texture, shader, material)
-- cooking pipeline: shaders (WGSL source), textures (raw RGBA), meshes (GPU-ready vertices/indices), materials (PBR params)
-- runtime `load_pak` populates `AssetRegistry` directly from cooked data (no decode/parse)
-- `pie_tools export` runs cook + `cargo build --release -p pie_runtime` and copies binary to output
-- 94 tests pass (88 runtime + 4 editor + 2 tools); end-to-end verified cooking sample assets
+- **Not fully verified — see `pie-engine-v1-checklist.md` section 7 and the V1 exit
+  criteria.** The checklist is canonical; this block is a summary.
+- Implemented: `pie_tools` CLI with `cook` and `export` commands (clap-based); `.pak`
+  binary format (header + type-tagged asset entries: mesh, texture, shader, material);
+  cooking pipeline (shaders as WGSL source, textures as raw RGBA, meshes in GPU-ready
+  vertex/index layout, materials as PBR params); runtime `load_pak` populates
+  `AssetRegistry` directly from cooked data with no decode/parse; `pie_tools export`
+  runs cook + `cargo build --release -p pie_runtime` and copies the binary to the
+  output directory.
+- Tested: `cook_assets` produces the expected asset set (`cook_sample_assets_produces_expected_assets`);
+  `PakFile` write/read round-trip and rejection of invalid magic/version/kind
+  (5 tests in `pie_runtime::assets::pak`); `load_pak` round-trips a cooked pak into a
+  populated `AssetRegistry` (`load_pak_round_trip`).
+- **Gap (unchecked checklist item):** the full `export` command producing **both** a runtime
+  binary **and** `assets.pak` together is not exercised by an automated test, because
+  doing so requires a release build of `pie_runtime` (minutes-scale). The export code
+  path exists and the cook + `load_pak` halves are each verified, but the end-to-end
+  "binary + packaged assets in one output dir" claim is not yet test-verified. This is
+  tracked by the unchecked V1 exit-criterion "Export produces a runtime binary plus
+  packaged assets" and will be closed by a CI-runnable integration test (see M9's
+  benchmark/regression work, which establishes the CI harness that such a test belongs
+  in).
 
 ## Milestone 8: Networking prototype
 
@@ -254,6 +277,29 @@ Validate the client-server architecture before deeper engine investment.
 - local prediction and server correction both function visibly
 - networking choice is documented with tradeoffs and next steps
 
+### Status
+
+- **In progress.** The networking crate decision is made and the protocol-type
+  foundation is in place; the transport adapter + end-to-end prototype remain.
+- ✅ Crate decision: `renet` (+ `renetcode`), with reasoning recorded in
+  `pie-engine-project-brief.md` → "Networking crate — DECIDED". Chosen over
+  `quinn` (QUIC) because renet is message-oriented + purpose-built for the
+  server-authoritative/prediction model, has toggleable encryption (vs QUIC's
+  mandatory TLS), and a leaner dep tree. Protocol types are transport-agnostic so
+  a future swap is bounded to the adapter.
+- ✅ Protocol types: `pie_runtime::net` module with `Sequence` (wraparound-safe
+  serial-number arithmetic), `InputCommand` (sequence + opaque payload),
+  `Snapshot` (tick + last_acknowledged + opaque state), and `ClientInputBuffer`
+  (the rolling ring of unacknowledged predicted inputs with `discard_acknowledged`
+  + `replay_pending`). 11 tests cover sequence wraparound, the discard/replay
+  flow, and an end-to-end model of the prediction/reconciliation cycle.
+- ⬜ Transport adapter: wire `net` types to `renet` channels (ReliableUnordered
+  for input, Unreliable for snapshots) behind a `net` feature flag.
+- ⬜ Server-authoritative `SimulationCore` driver: server ticks the shared sim
+  from received inputs and broadcasts snapshots; client applies + predicts.
+- ⬜ Remote-player interpolation (~100ms buffer, per the brief).
+- ⬜ Headless server binary path exercised end-to-end with a real client.
+
 ## Milestone 9: Performance systems
 
 ### Goal
@@ -273,6 +319,47 @@ Add the engine-level optimizations that support the project's identity.
 - transient frame allocations avoid the global heap in hot paths
 - core engine tasks show measurable benefit from parallel execution where appropriate
 - profiling data can guide future optimization work
+
+### Status
+
+- **Complete — see `pie-engine-v1-checklist.md` section 8 (canonical).** All five
+  M9 items are checked off. The performance layer is now: always-on `FrameTiming`
+  metrics (M9.1) + feature-gated zero-cost `tracing`/Tracy spans (M9.2) + opt-in
+  `mimalloc` global allocator (M9.3) + opt-in `bumpalo` frame allocator (M9.4) +
+  a CI-runnable regression benchmark with tracked budgets (M9.5). Every system is
+  toggleable and its cost is documented, per the lean/measurable philosophy.
+- ✅ Frame timing metrics: `pie_runtime::profiling` module with `FrameTiming`
+  (input/sim/render/present phases), `FrameTimingHistory` (bounded ring buffer +
+  average + max_total), and `PhaseTimer` (RAII guard). Wired into
+  `run_main_loop_with_time_source` (records input + sim per frame; render/present
+  zero in the headless/main-loop path, populated by the client/editor render path
+  when present). `RuntimeApp` exposes `frame_timing_history()`/`_mut()` for the
+  editor overlay and benchmarks. 12 new tests. Cost: a handful of
+  `Instant::now()` calls per frame (ns-scale, well below noise floor).
+- ✅ Scoped profiling markers: `profile_span!` macro (feature-gated behind
+  `profiling`) emits `tracing` spans captured by Tracy via `init_tracy_subscriber()`.
+  **Zero-cost when disabled** — the macro expands to nothing and no `tracing` crates
+  are compiled in. Instrumented `SimulationCore::tick`/`run_phase` and the main loop.
+  Verified both configs: `--all-features` (clippy + 118 tests green) and
+  `--no-default-features --features rendering` (cargo check green, no tracing dep).
+- ✅ `mimalloc` global allocator: gated behind the `mimalloc` feature (toggleable
+  per philosophy); registered via `#[global_allocator]` in `pie_runtime`'s main.rs.
+  Off by default (system allocator); opt in with `--features mimalloc`. Cost
+  documented in-place.
+- ✅ `bumpalo` frame-temporary allocator: `pie_runtime::frame_alloc::FrameAllocator`
+  (newtype over `bumpalo::Bump`) behind the `frame-alloc` feature. Held by
+  `RuntimeApp`, reset once per frame in the main loop (O(1) pointer rewind,
+  chunks reused). Exposes `alloc()`, `alloc_str_copy()`, `bump()` for direct
+  allocation. 4 new tests. No-op `reset_frame_allocator()` when feature off, so
+  call sites need no cfg.
+- ✅ Benchmark/regression scene: `pie_runtime/tests/bench.rs` — a custom harness
+  (not unstable `cargo bench`) that runs 1000 moving entities for 256 frames,
+  collects `FrameTiming` via the M9.1 layer, and asserts CI budgets
+  (sim p99 < 1ms, sim mean < 500µs in debug). Runs in `cargo test` (loose debug
+  budgets catch O(n²) regressions) and `cargo test --release` (real numbers).
+  Measured debug baseline: p99 ≈ 42µs (budget has ~24× headroom). Includes an
+  `#[ignore]` stress variant (10k entities) for manual release profiling. Budgets
+  are documented constants with a recalibration policy in the file.
 
 ## Milestone 10: Advanced rendering path
 
@@ -335,9 +422,14 @@ Pursue the higher-end rendering features only after the baseline is stable.
 
 ## Immediate next steps
 
-- begin Milestone 7: asset cooking and export pipeline (`pie_tools` command structure, shader compilation, `.pak` packaging)
-- add `mimalloc` global allocator and `bumpalo` frame allocator (M9 groundwork)
-- plan KTX2 integration for cooked texture assets
+- Milestone 7 (asset cooking and export pipeline) is implemented; the only open v1
+  item is the end-to-end export integration test (tracked in the checklist).
+- **Milestone 9 (Performance basics) is the current focus** — see
+  `pie-engine-v1-checklist.md` section 8. Items: frame timing metrics, scoped
+  profiling markers (feature-gated, zero-cost when off), `mimalloc` global allocator,
+  `bumpalo` frame-temporary allocator, and a CI-runnable benchmark/regression scene
+  with tracked frame-time budgets.
+- Plan KTX2 integration for cooked texture assets (post-v1).
 
 ## Realistic v1 scope
 

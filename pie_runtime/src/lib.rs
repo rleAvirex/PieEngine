@@ -1,19 +1,23 @@
 pub mod assets;
 pub mod components;
 pub mod core;
+#[cfg(feature = "frame-alloc")]
+pub mod frame_alloc;
 pub mod logging;
 pub mod loop_runner;
+pub mod net;
 pub mod platform;
+pub mod profiling;
 #[cfg(feature = "rendering")]
 pub mod rendering;
 
 pub use assets::{
     AssetError, AssetRegistry, Handle, ImportedScene, MaterialAsset, MaterialHandle, MeshAsset,
     MeshHandle, MeshVertex, SpawnedScene, TextureAsset, TextureHandle, load_fbx_mesh,
-    load_fbx_meshes, load_gltf_scene, load_pie_mesh, load_pie_meshes_from_dir,
-    load_shader_named, load_shader_source, load_texture_from_path, spawn_imported_scene,
+    load_fbx_meshes, load_gltf_scene, load_pie_mesh, load_pie_meshes_from_dir, load_shader_named,
+    load_shader_source, load_texture_from_path, spawn_imported_scene,
 };
-pub use components::{ActiveCamera, Camera, MeshRenderer, Name, Transform, Velocity};
+pub use components::{ActiveCamera, Camera, DirectionalLight, MeshRenderer, Name, SkyLight, Transform, Velocity};
 pub use core::{
     BootstrapSceneResult, EngineMode, RuntimeApp, RuntimeConfig, RuntimeError, SimulationCore,
     SimulationPhase, create_client_app, create_headless_app, run_client_frame, run_client_frames,
@@ -24,5 +28,7 @@ pub use loop_runner::{
     MainLoopLimits, StopSignal, TimeSource, WallClock, install_ctrlc_handler, run_main_loop,
     run_main_loop_with_time_source,
 };
+pub use net::{ClientInputBuffer, InputCommand, Sequence, Snapshot};
+pub use profiling::{FramePhase, FrameTiming, FrameTimingHistory, PhaseTimer};
 #[cfg(feature = "rendering")]
 pub use rendering::run_client_window;

@@ -14,8 +14,8 @@
 use std::path::Path;
 
 use crate::assets::error::AssetError;
-use crate::assets::handle::MeshHandle;
 use crate::assets::handle::MaterialHandle;
+use crate::assets::handle::MeshHandle;
 use crate::assets::material::MaterialAsset;
 use crate::assets::mesh::{MeshAsset, MeshVertex};
 use crate::assets::registry::AssetRegistry;
@@ -32,7 +32,7 @@ pub fn load_pie_mesh(
     let metadata = load_pie_mesh_metadata(bin_path)?;
 
     let material = registry.insert_material(MaterialAsset::pbr(
-        &format!("{}_mat", metadata.name),
+        format!("{}_mat", metadata.name),
         [1.0, 1.0, 1.0, 1.0],
         0.0,
         1.0,
@@ -101,15 +101,21 @@ fn load_pie_mesh_metadata(bin_path: &Path) -> Result<PieMeshMetadata, AssetError
         });
     }
 
-    let json_data = std::fs::read_to_string(&json_path)
-        .map_err(|e| AssetError::io(&json_path, e))?;
+    let json_data =
+        std::fs::read_to_string(&json_path).map_err(|e| AssetError::io(&json_path, e))?;
 
-    let meta: serde_json::Value = serde_json::from_str(&json_data)
-        .map_err(|e| AssetError::io(&json_path, e))?;
+    let meta: serde_json::Value =
+        serde_json::from_str(&json_data).map_err(|e| AssetError::io(&json_path, e))?;
 
     let name = meta["name"]
         .as_str()
-        .unwrap_or_else(|| bin_path.file_stem().unwrap_or_default().to_str().unwrap_or("mesh"))
+        .unwrap_or_else(|| {
+            bin_path
+                .file_stem()
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or("mesh")
+        })
         .to_string();
 
     let vertex_count = meta["vertex_count"].as_u64().unwrap_or(0) as usize;
@@ -161,7 +167,11 @@ fn parse_pie_mesh_data(
         }
 
         let vertices = parse_vertices(&data[0..vertex_data_len], meta.vertex_count, path)?;
-        let indices = parse_indices(&data[vertex_data_len..vertex_data_len + index_data_len], meta.index_count);
+        let indices = parse_indices(
+            &data[vertex_data_len..vertex_data_len + index_data_len],
+            meta.index_count,
+            path,
+        )?;
 
         Ok(MeshAsset {
             name: meta.name.clone(),
@@ -178,7 +188,7 @@ fn parse_pie_mesh_data(
         let vertex_data_len = best_guess * vertex_bytes;
         let remaining = data.len() - vertex_data_len;
 
-        if remaining % 4 != 0 {
+        if !remaining.is_multiple_of(4) {
             return Err(AssetError::io(
                 path,
                 std::io::Error::new(
@@ -190,7 +200,7 @@ fn parse_pie_mesh_data(
 
         let index_count = remaining / 4;
         let vertices = parse_vertices(&data[0..vertex_data_len], best_guess, path)?;
-        let indices = parse_indices(&data[vertex_data_len..], index_count);
+        let indices = parse_indices(&data[vertex_data_len..], index_count, path)?;
 
         Ok(MeshAsset {
             name: meta.name.clone(),
@@ -214,7 +224,7 @@ fn guess_vertex_count(data: &[u8], floats_per_vertex: usize) -> usize {
         let vertex_data_len = vertex_count * vertex_bytes;
         let remaining = data.len() - vertex_data_len;
 
-        if remaining % 4 != 0 {
+        if !remaining.is_multiple_of(4) {
             continue;
         }
 
@@ -224,7 +234,7 @@ fn guess_vertex_count(data: &[u8], floats_per_vertex: usize) -> usize {
         }
 
         // Check that index count is divisible by 3 (triangles)
-        if index_count % 3 != 0 {
+        if !index_count.is_multiple_of(3) {
             continue;
         }
 
@@ -280,8 +290,27 @@ fn parse_vertices(
     Ok(vertices)
 }
 
-fn parse_indices(data: &[u8], _index_count: usize) -> Vec<u32> {
-    bytemuck::cast_slice(data).to_vec()
+fn parse_indices(
+    data: &[u8],
+    _index_count: usize,
+    path: &Path,
+) -> Result<Vec<u32>, AssetError> {
+    // `bytemuck::cast_slice` panics if `data.len()` is not a multiple of 4
+    // (the size of u32). Validate up front so a malformed pie_mesh fails
+    // gracefully instead of panicking.
+    if data.len() % 4 != 0 {
+        return Err(AssetError::io(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "pie_mesh: index buffer length {} is not a multiple of 4 (u32 size)",
+                    data.len()
+                ),
+            ),
+        ));
+    }
+    Ok(bytemuck::cast_slice(data).to_vec())
 }
 
 #[cfg(test)]
@@ -323,7 +352,10 @@ mod tests {
             .join("../assets/Engine/Gizmos/GizmosSphere.bin");
 
         if !path.exists() {
-            eprintln!("Skipping pie_mesh test; GizmosSphere.bin not found at {}", path.display());
+            eprintln!(
+                "Skipping pie_mesh test; GizmosSphere.bin not found at {}",
+                path.display()
+            );
             return;
         }
 
@@ -338,8 +370,8 @@ mod tests {
 
     #[test]
     fn load_pie_meshes_from_dir_loads_all_gizmos() {
-        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../assets/Engine/Gizmos");
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/Engine/Gizmos");
 
         if !dir.exists() {
             eprintln!("Skipping pie_mesh dir test; Gizmos dir not found");
@@ -354,7 +386,7 @@ mod tests {
             return;
         }
 
-        assert!(handles.len() >= 1, "should find at least one .bin file");
+        assert!(!handles.is_empty(), "should find at least one .bin file");
         for handle in &handles {
             let mesh = registry.mesh(*handle).expect("mesh should exist");
             assert!(!mesh.vertices.is_empty());

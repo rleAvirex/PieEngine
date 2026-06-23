@@ -36,6 +36,13 @@ struct LightUniform {
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// Maximum number of drawables the renderer can render in a single frame.
+///
+/// Each drawable occupies one slot in the model uniform buffer; if the scene
+/// exceeds this, the extras are skipped with a warning. Sized to cover any
+/// realistic editor scene without over-allocating GPU memory.
+const MAX_DRAWABLES: usize = 4096;
+
 fn create_depth_texture(
     device: &wgpu::Device,
     width: u32,
@@ -90,6 +97,18 @@ pub struct Renderer {
     model_bind_group: wgpu::BindGroup,
     light_buffer: wgpu::Buffer,
     light_bind_group: wgpu::BindGroup,
+    /// Fallback sky-light cubemap (1x1 black per face) bound at group 2
+    /// bindings 1 & 2 so the runtime renderer's pipeline layout matches the
+    /// sky-light bindings declared in textured_mesh.wgsl. The runtime
+    /// renderer doesn't capture a sky-light cubemap (that's an editor
+    /// feature), so this neutral cubemap stands in. Kept as a field so the
+    /// bind group's texture reference stays alive.
+    #[allow(dead_code)]
+    fallback_sky_light_cubemap: wgpu::Texture,
+    #[allow(dead_code)]
+    fallback_sky_light_cubemap_view: wgpu::TextureView,
+    #[allow(dead_code)]
+    fallback_sky_light_sampler: wgpu::Sampler,
     material_bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     #[allow(dead_code)]
@@ -182,8 +201,11 @@ impl Renderer {
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                        has_dynamic_offset: true,
+                        min_binding_size: Some(
+                            std::num::NonZeroU64::new(std::mem::size_of::<ModelUniform>() as u64)
+                                .expect("ModelUniform is non-zero sized"),
+                        ),
                     },
                     count: None,
                 }],
@@ -235,16 +257,38 @@ impl Renderer {
         let light_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("light bind group layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    // binding 1 + 2: sky light cubemap + sampler — declared in
+                    // textured_mesh.wgsl. The runtime renderer doesn't capture a
+                    // sky-light cubemap (that's an editor feature), so we bind a
+                    // 1x1 fallback cubemap so the pipeline layout validates.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::Cube,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
             });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -285,7 +329,9 @@ impl Renderer {
                         },
                         wgpu::VertexAttribute {
                             format: wgpu::VertexFormat::Float32x4,
-                            offset: (std::mem::size_of::<[f32; 3]>() * 2 + std::mem::size_of::<[f32; 2]>()) as wgpu::BufferAddress,
+                            offset: (std::mem::size_of::<[f32; 3]>() * 2
+                                + std::mem::size_of::<[f32; 2]>())
+                                as wgpu::BufferAddress,
                             shader_location: 3,
                         },
                     ],
@@ -341,7 +387,10 @@ impl Renderer {
 
         let model_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("model uniform buffer"),
-            size: std::mem::size_of::<ModelUniform>() as u64,
+            // Allocate slots for the worst-case number of drawables per frame.
+            // Each slot is one ModelUniform; the per-draw bind group uses
+            // has_dynamic_offset to address a single slot by byte offset.
+            size: (std::mem::size_of::<ModelUniform>() * MAX_DRAWABLES) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -351,7 +400,14 @@ impl Renderer {
             layout: &model_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: model_buffer.as_entire_binding(),
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &model_buffer,
+                    offset: 0,
+                    size: Some(std::num::NonZeroU64::new(
+                        std::mem::size_of::<ModelUniform>() as u64,
+                    )
+                    .expect("ModelUniform is non-zero sized")),
+                }),
             }],
         });
 
@@ -362,14 +418,89 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let light_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("light bind group"),
-            layout: &light_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: light_buffer.as_entire_binding(),
-            }],
-        });
+        let light_bind_group = {
+            // Fallback 1x1 black cubemap + sampler so the sky-light bindings in
+            // textured_mesh.wgsl have valid resources to sample. The runtime
+            // renderer doesn't capture a sky-light cubemap (that's an editor
+            // feature), so we bind a neutral black cubemap.
+            let fallback_sky_light_cubemap = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("fallback sky-light cubemap"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 6,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            // Initialize all 6 faces to a neutral dim grey (a bit of ambient so
+            // unlit corners aren't pitch black).
+            for face in 0..6 {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &fallback_sky_light_cubemap,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x: 0, y: 0, z: face },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &[40, 40, 50, 255],
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4),
+                        rows_per_image: Some(1),
+                    },
+                    wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+            let fallback_sky_light_cubemap_view =
+                fallback_sky_light_cubemap.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::Cube),
+                    ..wgpu::TextureViewDescriptor::default()
+                });
+            let fallback_sky_light_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("sky light sampler"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            });
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("light bind group"),
+                layout: &light_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: light_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&fallback_sky_light_cubemap_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&fallback_sky_light_sampler),
+                    },
+                ],
+            });
+            (
+                bg,
+                fallback_sky_light_cubemap,
+                fallback_sky_light_cubemap_view,
+                fallback_sky_light_sampler,
+            )
+        };
+        let (light_bind_group, fallback_sky_light_cubemap, fallback_sky_light_cubemap_view, fallback_sky_light_sampler) = light_bind_group;
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("linear sampler"),
@@ -433,6 +564,9 @@ impl Renderer {
             model_bind_group,
             light_buffer,
             light_bind_group,
+            fallback_sky_light_cubemap,
+            fallback_sky_light_cubemap_view,
+            fallback_sky_light_sampler,
             material_bind_group_layout: texture_bind_group_layout,
             sampler,
             fallback_texture,
@@ -522,9 +656,7 @@ impl Renderer {
             .as_ref()
             .map(|t| &t.view)
             .unwrap_or(&self.fallback_texture_view);
-        let normal_view_ref = normal_view
-            .as_ref()
-            .unwrap_or(&self.fallback_texture_view);
+        let normal_view_ref = normal_view.as_ref().unwrap_or(&self.fallback_texture_view);
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material bind group"),
@@ -566,8 +698,7 @@ impl Renderer {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
 
-        let (depth_texture, depth_texture_view) =
-            create_depth_texture(&self.device, width, height);
+        let (depth_texture, depth_texture_view) = create_depth_texture(&self.device, width, height);
         self.depth_texture = depth_texture;
         self.depth_texture_view = depth_texture_view;
     }
@@ -579,8 +710,11 @@ impl Renderer {
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
 
         let directional_light = simulation
-            .resource::<DirectionalLight>()
-            .copied()
+            .world()
+            .query::<&DirectionalLight>()
+            .iter()
+            .map(|(_, light)| *light)
+            .next()
             .unwrap_or_default();
         let light_uniform = LightUniform {
             direction: [
@@ -598,6 +732,35 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.light_buffer, 0, bytemuck::bytes_of(&light_uniform));
+
+        // Pre-compute per-drawable model uniforms into a staging buffer so we
+        // can issue a single `queue.write_buffer` for ALL drawables before the
+        // render pass begins. The old code called `queue.write_buffer` inside
+        // the per-drawable render-pass loop; because queue operations are
+        // processed in order *before* `queue.submit(encoder.finish())`, every
+        // draw ended up reading the last drawable's model matrix.
+        let model_uniform_size = std::mem::size_of::<ModelUniform>();
+        let drawable_count = self.drawables.len().min(MAX_DRAWABLES);
+        let mut model_uniforms: Vec<ModelUniform> = Vec::with_capacity(drawable_count);
+        for drawable in self.drawables.iter().take(drawable_count) {
+            let transform = simulation
+                .world()
+                .get::<&Transform>(drawable.entity)
+                .ok()
+                .map(|transform| *transform)
+                .unwrap_or_default();
+            let model = transform_to_matrix(transform);
+            model_uniforms.push(ModelUniform {
+                model: model.to_cols_array_2d(),
+                normal_matrix: model.inverse().transpose().to_cols_array_2d(),
+            });
+        }
+        // Single write of the entire model uniform array.
+        self.queue.write_buffer(
+            &self.model_buffer,
+            0,
+            bytemuck::cast_slice(&model_uniforms),
+        );
 
         let frame = self.surface.get_current_texture()?;
         let view = frame
@@ -642,22 +805,16 @@ impl Renderer {
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             render_pass.set_bind_group(2, &self.light_bind_group, &[]);
 
-            for drawable in &self.drawables {
-                let transform = simulation
-                    .world()
-                    .get::<&Transform>(drawable.entity)
-                    .ok()
-                    .map(|transform| *transform)
-                    .unwrap_or_default();
-                let model = transform_to_matrix(transform);
-                let model_uniform = ModelUniform {
-                    model: model.to_cols_array_2d(),
-                    normal_matrix: model.inverse().transpose().to_cols_array_2d(),
-                };
-                self.queue
-                    .write_buffer(&self.model_buffer, 0, bytemuck::bytes_of(&model_uniform));
-
-                render_pass.set_bind_group(1, &self.model_bind_group, &[]);
+            for (index, drawable) in self.drawables.iter().enumerate().take(drawable_count) {
+                if index >= MAX_DRAWABLES {
+                    break;
+                }
+                // Address this drawable's slot in the model uniform buffer via
+                // dynamic offset. This is processed by the render pass at draw
+                // time (not as a separate queue op), so each draw reads the
+                // correct matrix.
+                let dynamic_offset = (index * model_uniform_size) as u32;
+                render_pass.set_bind_group(1, &self.model_bind_group, &[dynamic_offset]);
                 let material = self
                     .materials
                     .get(&drawable.material)
