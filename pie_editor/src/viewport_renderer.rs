@@ -192,6 +192,21 @@ struct LineCameraUniform {
     view_proj: [[f32; 4]; 4],
 }
 
+/// Cloud billboard uniform — must match cloud_billboard.wgsl CloudUniform.
+/// One per Cloud entity, uploaded each frame.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct CloudUniform {
+    /// xyz = world position of the cloud center, w = size (meters).
+    center_size: [f32; 4],
+    /// xyz = base color (linear RGB), w = density (0..1).
+    color_density: [f32; 4],
+    /// xyz = sun direction (normalized, TO the sun), w = wind scroll offset.
+    sun_dir_wind: [f32; 4],
+    /// xyz = sun color * sun intensity (for tinting), w = time (seconds).
+    sun_color_time: [f32; 4],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct LineColorUniform {
@@ -321,6 +336,13 @@ pub struct EditorViewportRenderer {
     sky_light_dirty: bool,
     /// Frame counter used to throttle real-time captures (capture every N frames).
     sky_light_frame_counter: u32,
+    // -- Clouds (entity-driven billboards) --
+    cloud_pipeline: Option<wgpu::RenderPipeline>,
+    cloud_camera_bgl: wgpu::BindGroupLayout,
+    /// Per-frame uniform buffer for the cloud currently being drawn. Reused
+    /// across all clouds in a frame via write_buffer before each draw.
+    cloud_uniform_buffer: wgpu::Buffer,
+    cloud_bind_group: wgpu::BindGroup,
 }
 
 impl EditorViewportRenderer {
@@ -1162,6 +1184,143 @@ impl EditorViewportRenderer {
                 ],
             });
 
+        // -- Cloud billboard pipeline --
+        // Renders each Cloud entity as a camera-facing billboard with
+        // procedural noise-driven density. Drawn after the sky pass and
+        // before the scene pass, so geometry occludes clouds via depth.
+        let cloud_shader_source =
+            load_shader_named(assets_root, "cloud_billboard").map_err(|e| e.to_string())?;
+        let cloud_shader = device
+            .as_ref()
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("cloud billboard shader"),
+                source: wgpu::ShaderSource::Wgsl(cloud_shader_source.into()),
+            });
+
+        // Bind group layout: binding 0 = camera uniform, binding 1 = cloud uniform.
+        // Reuses the existing camera_buffer (same CameraUniform struct the
+        // shader declares).
+        let cloud_camera_bgl =
+            device
+                .as_ref()
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("cloud bind group layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: Some(std::num::NonZeroU64::new(
+                                    std::mem::size_of::<CameraUniform>() as u64,
+                                )
+                                .expect("CameraUniform is non-zero sized")),
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+
+        let cloud_pipeline_layout =
+            device
+                .as_ref()
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("cloud pipeline layout"),
+                    bind_group_layouts: &[&cloud_camera_bgl],
+                    push_constant_ranges: &[],
+                });
+
+        let cloud_pipeline = try_create_render_pipeline(
+            device.as_ref(),
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("cloud billboard pipeline"),
+                layout: Some(&cloud_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &cloud_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &cloud_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: hdr_format,
+                        // Alpha blend: cloud over sky. Premultiplied alpha
+                        // so the shader can output color*density in RGB and
+                        // density in A, and the blend composites correctly.
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None, // double-sided — billboard visible from any angle
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    // Clouds don't write depth — they shouldn't occlude the
+                    // scene pass that follows. They DO test depth so scene
+                    // geometry occludes clouds.
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            },
+        );
+
+        let cloud_uniform_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cloud uniform buffer"),
+            size: std::mem::size_of::<CloudUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let cloud_bind_group = device
+            .as_ref()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("cloud bind group"),
+                layout: &cloud_camera_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &camera_buffer,
+                            offset: 0,
+                            size: Some(std::num::NonZeroU64::new(
+                                std::mem::size_of::<CameraUniform>() as u64,
+                            )
+                            .expect("CameraUniform is non-zero sized")),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: cloud_uniform_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+
         // Separate camera buffer + sky bind group for cubemap capture, so the
         // cubemap face capture loop can write per-face view-projections without
         // clobbering the main camera buffer (which Pass 0 / Pass 1 read).
@@ -1305,6 +1464,10 @@ impl EditorViewportRenderer {
             sky_light_sampler,
             sky_light_dirty: true,
             sky_light_frame_counter: 0,
+            cloud_pipeline,
+            cloud_camera_bgl,
+            cloud_uniform_buffer,
+            cloud_bind_group,
         })
     }
 
@@ -1871,6 +2034,118 @@ impl EditorViewportRenderer {
                 rp.set_pipeline(pipeline);
                 rp.set_bind_group(0, &self.sky_bind_group, &[0]);
                 rp.draw(0..3, 0..1);
+            }
+        }
+
+        // ====================================================================
+        // Pass 0.5: Clouds → HDR render target (alpha-blended over sky)
+        // ====================================================================
+        // Draws each Cloud entity as a camera-facing billboard. Runs after
+        // the sky pass (clouds occlude sky) and before the scene pass
+        // (scene geometry occludes clouds via depth test).
+        //
+        // If the cloud pipeline failed to compile, this pass is skipped
+        // entirely — the rest of the frame renders normally.
+        if let Some(cloud_pipeline) = self.cloud_pipeline.as_ref() {
+            // Query all Cloud entities. Each gets its own uniform upload +
+            // draw call. Sorted back-to-front by distance for correct
+            // alpha blending (cheap — typically <10 clouds).
+            let mut cloud_draws: Vec<(CloudUniform,)> = simulation
+                .world()
+                .query::<(&pie_runtime::components::Cloud, &Transform)>()
+                .iter()
+                .map(|(_, (cloud, transform))| {
+                    let center = transform.translation
+                        + Vec3::Y * cloud.altitude_offset;
+                    // Use the simulation's frame counter as a time proxy.
+                    // Each frame increments by 1, so wind_speed is in
+                    // "texture units per frame". Good enough for animation
+                    // without needing wall-clock time.
+                    let time = simulation.frame() as f32;
+                    let wind_offset = cloud.wind_speed * time * 0.0167; // ~60fps
+                    let sun_color = dl.color * (dl.intensity * 0.02);
+                    (
+                        CloudUniform {
+                            center_size: [center.x, center.y, center.z, cloud.size],
+                            color_density: [
+                                cloud.color.x,
+                                cloud.color.y,
+                                cloud.color.z,
+                                cloud.density,
+                            ],
+                            sun_dir_wind: [
+                                sun_dir.x,
+                                sun_dir.y,
+                                sun_dir.z,
+                                wind_offset,
+                            ],
+                            sun_color_time: [
+                                sun_color.x,
+                                sun_color.y,
+                                sun_color.z,
+                                time,
+                            ],
+                        },
+                    )
+                })
+                .collect();
+
+            if !cloud_draws.is_empty() {
+                // Sort back-to-front by distance from camera (farthest first)
+                // so alpha blending composites correctly.
+                let cam_pos = simulation
+                    .active_camera()
+                    .and_then(|e| simulation.world().get::<&Transform>(e).ok())
+                    .map(|t| t.translation)
+                    .unwrap_or_default();
+                cloud_draws.sort_by(|a, b| {
+                    let da = Vec3::new(
+                        a.0.center_size[0] - cam_pos.x,
+                        a.0.center_size[1] - cam_pos.y,
+                        a.0.center_size[2] - cam_pos.z,
+                    ).length_squared();
+                    let db = Vec3::new(
+                        b.0.center_size[0] - cam_pos.x,
+                        b.0.center_size[1] - cam_pos.y,
+                        b.0.center_size[2] - cam_pos.z,
+                    ).length_squared();
+                    db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("editor cloud pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.hdr_texture_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            // Load the sky from Pass 0 — clouds composite over it.
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_texture_view,
+                        depth_ops: Some(wgpu::Operations {
+                            // Load depth from Pass 0 (sky cleared it). Clouds
+                            // test against it but don't write.
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                rp.set_pipeline(cloud_pipeline);
+                rp.set_bind_group(0, &self.cloud_bind_group, &[]);
+                for (uniform,) in &cloud_draws {
+                    self.queue.as_ref().write_buffer(
+                        &self.cloud_uniform_buffer,
+                        0,
+                        bytemuck::bytes_of(uniform),
+                    );
+                    rp.draw(0..6, 0..1);
+                }
             }
         }
 

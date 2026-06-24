@@ -139,6 +139,41 @@ impl Default for SkyLight {
     }
 }
 
+/// Volumetric cloud entity — spawnable from the editor's Assets menu and
+/// editable in the Details dock. Rendered as a camera-facing billboard with
+/// procedural noise-driven density, composited over the sky.
+///
+/// The viewport renderer queries all `Cloud` components each frame and
+/// draws them after the sky pass but before the scene pass, so geometry
+/// can occlude clouds via the depth buffer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Cloud {
+    /// Overall cloud density / opacity multiplier (0 = invisible, 1 = opaque).
+    pub density: f32,
+    /// Cloud base color (RGB, linear). Tinted by sun direction at render time.
+    pub color: Vec3,
+    /// World-space size of the cloud billboard (meters).
+    pub size: f32,
+    /// Wind scroll speed in world units per second. Scrolls the noise
+    /// texture offset over time for animation.
+    pub wind_speed: f32,
+    /// Altitude offset above the cloud's Transform.translation.y (meters).
+    /// Useful for layering multiple clouds at different heights.
+    pub altitude_offset: f32,
+}
+
+impl Default for Cloud {
+    fn default() -> Self {
+        Self {
+            density: 0.8,
+            color: Vec3::splat(1.0),
+            size: 20.0,
+            wind_speed: 1.0,
+            altitude_offset: 0.0,
+        }
+    }
+}
+
 /// References a mesh/material pair loaded through the asset registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MeshRenderer {

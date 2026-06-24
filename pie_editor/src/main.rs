@@ -22,7 +22,7 @@ use egui_winit::State as EguiWinitState;
 use glam::{Vec2, Vec3};
 use hecs::Entity;
 use pie_runtime::assets::{AssetRegistry, load_fbx_meshes, load_gltf_scene, spawn_imported_scene};
-use pie_runtime::components::{Camera, DirectionalLight, Name, SkyLight, Transform};
+use pie_runtime::components::{Camera, Cloud, DirectionalLight, Name, SkyLight, Transform};
 use ui::SpawnableEntity;
 use pie_runtime::core::RuntimeApp;
 use pie_runtime::init_logging;
@@ -159,6 +159,15 @@ impl EditorScene {
                     pie_runtime::components::Name::new("Directional Light"),
                     pie_runtime::components::DirectionalLight::default(),
                     pie_runtime::components::Transform::default(),
+                ));
+                // Spawn a default cloud so the cloud feature is visible
+                // without the user having to add one manually.
+                let mut cloud_transform = pie_runtime::components::Transform::default();
+                cloud_transform.translation = Vec3::new(0.0, 18.0, -10.0);
+                runtime.simulation_mut().world_mut().spawn((
+                    pie_runtime::components::Name::new("Cloud"),
+                    pie_runtime::components::Cloud::default(),
+                    cloud_transform,
                 ));
             }
             Err(error) => {
@@ -379,6 +388,16 @@ impl EditorApp {
                     Name::new("Sky Light"),
                     SkyLight::default(),
                     transform,
+                ))
+            }
+            SpawnableEntity::Cloud => {
+                // Spawn clouds up in the sky so they're visible by default.
+                let mut cloud_transform = transform;
+                cloud_transform.translation = Vec3::new(0.0, 15.0, 0.0);
+                world.spawn((
+                    Name::new("Cloud"),
+                    Cloud::default(),
+                    cloud_transform,
                 ))
             }
         }

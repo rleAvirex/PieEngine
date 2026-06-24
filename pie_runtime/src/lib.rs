@@ -17,7 +17,7 @@ pub use assets::{
     load_fbx_meshes, load_gltf_scene, load_pie_mesh, load_pie_meshes_from_dir, load_shader_named,
     load_shader_source, load_texture_from_path, spawn_imported_scene,
 };
-pub use components::{ActiveCamera, Camera, DirectionalLight, MeshRenderer, Name, SkyLight, Transform, Velocity};
+pub use components::{ActiveCamera, Camera, Cloud, DirectionalLight, MeshRenderer, Name, SkyLight, Transform, Velocity};
 pub use core::{
     BootstrapSceneResult, EngineMode, RuntimeApp, RuntimeConfig, RuntimeError, SimulationCore,
     SimulationPhase, create_client_app, create_headless_app, run_client_frame, run_client_frames,

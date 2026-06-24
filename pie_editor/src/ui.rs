@@ -16,7 +16,7 @@ use egui::{
     TopBottomPanel, Widget, load::SizedTexture, vec2,
 };
 use hecs::Entity;
-use pie_runtime::components::{Camera, DirectionalLight, Name, SkyLight, Transform};
+use pie_runtime::components::{Camera, Cloud, DirectionalLight, Name, SkyLight, Transform};
 use pie_runtime::core::RuntimeApp;
 
 use crate::dock_layout as dock;
@@ -31,15 +31,17 @@ pub enum SpawnableEntity {
     Camera,
     DirectionalLight,
     SkyLight,
+    Cloud,
 }
 
 impl SpawnableEntity {
     /// All spawnable entity types in display order.
-    pub const ALL: [SpawnableEntity; 4] = [
+    pub const ALL: [SpawnableEntity; 5] = [
         SpawnableEntity::Empty,
         SpawnableEntity::Camera,
         SpawnableEntity::DirectionalLight,
         SpawnableEntity::SkyLight,
+        SpawnableEntity::Cloud,
     ];
 
     /// Human-readable label for the entity type.
@@ -49,6 +51,7 @@ impl SpawnableEntity {
             SpawnableEntity::Camera => "Camera",
             SpawnableEntity::DirectionalLight => "Directional Light",
             SpawnableEntity::SkyLight => "Sky Light",
+            SpawnableEntity::Cloud => "Cloud",
         }
     }
 
@@ -59,6 +62,7 @@ impl SpawnableEntity {
             SpawnableEntity::Camera => "Perspective camera with configurable FOV",
             SpawnableEntity::DirectionalLight => "Sun/moon light with atmosphere support",
             SpawnableEntity::SkyLight => "Captures sky for indirect lighting (IBL)",
+            SpawnableEntity::Cloud => "Volumetric cloud with density / wind controls",
         }
     }
 
@@ -69,6 +73,7 @@ impl SpawnableEntity {
             SpawnableEntity::Camera => "◉",
             SpawnableEntity::DirectionalLight => "☀",
             SpawnableEntity::SkyLight => "◌",
+            SpawnableEntity::Cloud => "☁",
         }
     }
 }
@@ -676,6 +681,55 @@ fn show_details_content(
                             if changed {
                                 sky_light.capture_resolution = res;
                             }
+                        });
+                    }
+
+                    // Cloud properties
+                    if let Ok(mut cloud) = runtime
+                        .simulation_mut()
+                        .world_mut()
+                        .get::<&mut Cloud>(entity)
+                    {
+                        uc::styled_separator(ui);
+
+                        uc::property_row(ui, "Density", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut cloud.density)
+                                    .speed(0.05)
+                                    .range(0.0..=1.0)
+                                    .min_decimals(2),
+                            );
+                        });
+
+                        {
+                            let mut c = cloud.color;
+                            uc::axis_row(ui, "Color", &mut c.x, &mut c.y, &mut c.z, 0.05);
+                            cloud.color = c;
+                        }
+
+                        uc::property_row(ui, "Size", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut cloud.size)
+                                    .speed(0.5)
+                                    .range(1.0..=200.0)
+                                    .min_decimals(2),
+                            );
+                        });
+
+                        uc::property_row(ui, "Wind Speed", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut cloud.wind_speed)
+                                    .speed(0.1)
+                                    .min_decimals(2),
+                            );
+                        });
+
+                        uc::property_row(ui, "Altitude Offset", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut cloud.altitude_offset)
+                                    .speed(0.5)
+                                    .min_decimals(2),
+                            );
                         });
                     }
                 });
