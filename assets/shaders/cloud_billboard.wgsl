@@ -42,13 +42,13 @@ struct CloudUniform {
 
 const PI: f32 = 3.141592653589793;
 
-// Ray-march configuration — tuned for visible, dense clouds.
-const PRIMARY_STEPS:     u32 = 32;    // was 16 — more samples = denser
-const LIGHT_STEPS:       u32 = 6;     // was 4
-const DENSITY_THRESHOLD: f32 = 0.25;  // was 0.35 — less carving
-const DENSITY_MULTIPLIER: f32 = 2.0;  // overall density boost
-const LIGHT_ABSORPTION:  f32 = 8.0;   // was 1.5 — much denser clouds
-const STEP_SIZE:         f32 = 1.0 / 32.0; // covers full volume depth
+// Ray-march configuration — tuned for visible, dense clouds at good perf.
+const PRIMARY_STEPS:     u32 = 16;    // was 32 — halved for perf
+const LIGHT_STEPS:       u32 = 4;     // was 6 — halved for perf
+const DENSITY_THRESHOLD: f32 = 0.25;
+const DENSITY_MULTIPLIER: f32 = 2.0;
+const LIGHT_ABSORPTION:  f32 = 8.0;
+const STEP_SIZE:         f32 = 1.0 / 16.0; // covers full volume depth
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,

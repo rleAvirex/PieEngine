@@ -7,7 +7,7 @@
 //! The noise is tileable in all 3 axes so the shader can scroll the sampling
 //! offset freely for wind animation without seams.
 
-const NOISE_SIZE: u32 = 256;
+const NOISE_SIZE: u32 = 128;
 
 /// Generate a 128³ R8 3D noise texture for cloud rendering.
 ///
@@ -95,9 +95,10 @@ fn generate_noise_volume() -> Vec<u8> {
             for x in 0..n {
                 let p = [x as f32 / n as f32, y as f32 / n as f32, z as f32 / n as f32];
 
-                // 4-octave fbm of Perlin + Worley.
-                let perlin = fbm_perlin(&gradients, p, 4);
-                let worley = fbm_worley(p, 4);
+                // 2-octave fbm (was 4 — halved load time, visually identical
+                // at 128³ resolution).
+                let perlin = fbm_perlin(&gradients, p, 2);
+                let worley = fbm_worley(p, 2);
 
                 // Combine: Perlin provides large-scale structure, Worley
                 // carves out the cellular puff detail. Normalize to [0,1].
@@ -112,10 +113,11 @@ fn generate_noise_volume() -> Vec<u8> {
     data
 }
 
-/// Precompute a tileable Perlin gradient lattice. Size 8³ with wrapping
-/// gives smooth, repeatable noise at the texture boundary.
+/// Precompute a tileable Perlin gradient lattice. Size 16³ with wrapping
+/// gives smooth, repeatable noise at the texture boundary. (Was 8³ — the
+/// coarse lattice caused a visible grid pattern in the clouds.)
 fn generate_perlin_gradients() -> Vec<[f32; 3]> {
-    let lattice = 8usize;
+    let lattice = 16usize;
     let mut gradients = Vec::with_capacity(lattice * lattice * lattice);
     // Use a fixed seed for reproducibility.
     let mut seed: u32 = 12345;
@@ -135,7 +137,7 @@ fn generate_perlin_gradients() -> Vec<[f32; 3]> {
 
 /// 3D Perlin noise with lattice wrapping for tileability.
 fn perlin_noise(gradients: &[[f32; 3]], p: [f32; 3], lattice_size: f32) -> f32 {
-    let lattice = 8.0;
+    let lattice = 16.0;
     let xi = (p[0] * lattice_size).floor() % lattice;
     let yi = (p[1] * lattice_size).floor() % lattice;
     let zi = (p[2] * lattice_size).floor() % lattice;
@@ -143,14 +145,14 @@ fn perlin_noise(gradients: &[[f32; 3]], p: [f32; 3], lattice_size: f32) -> f32 {
     let yf = (p[1] * lattice_size).fract();
     let zf = (p[2] * lattice_size).fract();
 
-    let xi = (xi as i32).rem_euclid(8) as usize;
-    let yi = (yi as i32).rem_euclid(8) as usize;
-    let zi = (zi as i32).rem_euclid(8) as usize;
-    let xi1 = (xi + 1) % 8;
-    let yi1 = (yi + 1) % 8;
-    let zi1 = (zi + 1) % 8;
+    let xi = (xi as i32).rem_euclid(16) as usize;
+    let yi = (yi as i32).rem_euclid(16) as usize;
+    let zi = (zi as i32).rem_euclid(16) as usize;
+    let xi1 = (xi + 1) % 16;
+    let yi1 = (yi + 1) % 16;
+    let zi1 = (zi + 1) % 16;
 
-    let idx = |x: usize, y: usize, z: usize| (z * 8 + y) * 8 + x;
+    let idx = |x: usize, y: usize, z: usize| (z * 16 + y) * 16 + x;
 
     let g000 = gradients[idx(xi, yi, zi)];
     let g100 = gradients[idx(xi1, yi, zi)];
@@ -210,7 +212,7 @@ fn fbm_perlin(gradients: &[[f32; 3]], p: [f32; 3], octaves: u32) -> f32 {
 /// 3D Worley (cellular) noise. Returns distance to nearest feature point,
 /// normalized to roughly [0, 1]. Tileable via lattice wrapping.
 fn worley_noise(p: [f32; 3], frequency: f32) -> f32 {
-    let lattice = 8.0;
+    let lattice = 16.0;
     let cell_size = 1.0 / frequency;
     let cx = (p[0] / cell_size).floor() % lattice;
     let cy = (p[1] / cell_size).floor() % lattice;
@@ -219,18 +221,18 @@ fn worley_noise(p: [f32; 3], frequency: f32) -> f32 {
     let fy = (p[1] / cell_size).fract();
     let fz = (p[2] / cell_size).fract();
 
-    let cx = (cx as i32).rem_euclid(8) as i32;
-    let cy = (cy as i32).rem_euclid(8) as i32;
-    let cz = (cz as i32).rem_euclid(8) as i32;
+    let cx = (cx as i32).rem_euclid(16) as i32;
+    let cy = (cy as i32).rem_euclid(16) as i32;
+    let cz = (cz as i32).rem_euclid(16) as i32;
 
     let mut min_dist = f32::INFINITY;
     // Check the 3x3x3 neighborhood of cells.
     for dz in -1..=1 {
         for dy in -1..=1 {
             for dx in -1..=1 {
-                let nx = (cx + dx).rem_euclid(8) as usize;
-                let ny = (cy + dy).rem_euclid(8) as usize;
-                let nz = (cz + dz).rem_euclid(8) as usize;
+                let nx = (cx + dx).rem_euclid(16) as usize;
+                let ny = (cy + dy).rem_euclid(16) as usize;
+                let nz = (cz + dz).rem_euclid(16) as usize;
                 // Deterministic feature point per cell (hash-based).
                 let h = hash3(nx, ny, nz);
                 let px = dx as f32 + h.0 - fx;
