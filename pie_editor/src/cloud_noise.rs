@@ -7,7 +7,7 @@
 //! The noise is tileable in all 3 axes so the shader can scroll the sampling
 //! offset freely for wind animation without seams.
 
-const NOISE_SIZE: u32 = 128;
+const NOISE_SIZE: u32 = 256;
 
 /// Generate a 128³ R8 3D noise texture for cloud rendering.
 ///
