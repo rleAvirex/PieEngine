@@ -42,12 +42,54 @@ var normal_texture: texture_2d<f32>;
 @group(3) @binding(3)
 var base_color_sampler: sampler;
 
+// Cloud shadow data — up to 8 cloud spheres for analytical shadow computation.
+struct CloudShadows {
+    clouds: array<vec4<f32>, 8>,  // xyz = center, w = radius
+    count: vec4<f32>,             // x = active count, yzw unused
+};
+
 // Sky light cubemap — captured from the Sky Atmosphere for indirect lighting.
 // Bound in the light group (group 2) alongside the directional light uniform.
 @group(2) @binding(1)
 var sky_light_cubemap: texture_cube<f32>;
 @group(2) @binding(2)
 var sky_light_sampler: sampler;
+
+@group(2) @binding(3)
+var<uniform> cloud_shadows: CloudShadows;
+
+/// Compute cloud shadow factor for a world position.
+/// Returns 0 = fully shadowed, 1 = no shadow.
+/// For each cloud sphere, checks if the sun ray from `world_pos` passes
+/// through the sphere and accumulates Beer-Lambert extinction.
+fn cloud_shadow_factor(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
+    let count = u32(cloud_shadows.count.x);
+    if (count == 0u) {
+        return 1.0;
+    }
+    var transmittance = 1.0;
+    for (var i: u32 = 0u; i < 8u; i = i + 1u) {
+        if (i >= count) { break; }
+        let cloud = cloud_shadows.clouds[i];
+        let center = cloud.xyz;
+        let radius = cloud.w;
+
+        // Closest approach of the sun ray (from world_pos) to the cloud center.
+        let oc = center - world_pos;
+        let proj_len = dot(oc, sun_dir);
+        if (proj_len < 0.0) { continue; }  // cloud is behind the point
+        let closest = length(oc - sun_dir * proj_len);
+        if (closest >= radius) { continue; }  // ray misses the sphere
+
+        // Half-chord length through the sphere (Pythagorean).
+        let half_chord = sqrt(max(radius * radius - closest * closest, 0.0));
+        // Optical depth through the sphere — approximate as 2 * half_chord *
+        // a density constant. The 0.8 factor tunes shadow intensity.
+        let optical_depth = 2.0 * half_chord * 0.8;
+        transmittance *= exp(-optical_depth);
+    }
+    return clamp(transmittance, 0.0, 1.0);
+}
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -220,7 +262,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     let ambient = ambient_diffuse + specular_ibl;
 
-    let lighting = ambient + (diffuse + specular) * light_radiance * n_dot_l;
+    // Cloud shadow: darken direct lighting when clouds occlude the sun.
+    // The shadow factor is computed analytically (ray-sphere intersection
+    // toward the sun through each cloud sphere). Ambient/sky light is NOT
+    // shadowed — only direct sun light.
+    let shadow = cloud_shadow_factor(input.world_position, light_direction);
+    let lighting = ambient + (diffuse + specular) * light_radiance * n_dot_l * shadow;
 
     // ACES tone map HDR → LDR, then output in linear space.
     // The sRGB swapchain (Rgba8UnormSrgb) applies gamma correction

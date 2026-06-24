@@ -28,7 +28,7 @@ impl SkyQuality {
 use std::sync::Arc;
 
 use egui::TextureId;
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 use hecs::Entity;
 use pie_runtime::assets::{
     AssetRegistry, MaterialAsset, MaterialHandle, MeshAsset, MeshVertex, load_shader_named,
@@ -168,6 +168,20 @@ struct EditorLightUniform {
     sky_light: [f32; 4],
 }
 
+/// Cloud shadow data — uploaded each frame so the PBR shader can compute
+/// analytical cloud shadows (ray-sphere intersection toward the sun).
+/// Supports up to 8 clouds; `count` is in the .w component of the first entry.
+const MAX_CLOUD_SHADOWS: usize = 8;
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct EditorCloudShadowUniform {
+    /// Up to 8 cloud entries: xyz = world center, w = radius.
+    clouds: [[f32; 4]; MAX_CLOUD_SHADOWS],
+    /// x = number of active clouds, yzw = padding.
+    count: [f32; 4],
+}
+
 /// Sky atmosphere parameters — must match sky_atmosphere.wgsl SkyParams layout.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -192,7 +206,15 @@ struct LineCameraUniform {
     view_proj: [[f32; 4]; 4],
 }
 
-/// Cloud billboard uniform — must match cloud_billboard.wgsl CloudUniform.
+/// Resolve pass uniform — sun screen position for god rays.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ResolveUniform {
+    /// Sun position in NDC [-1, 1] (xy), z = god ray intensity (0 = off).
+    sun_ndc: [f32; 4],
+}
+
+
 /// One per Cloud entity, uploaded each frame.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -278,6 +300,9 @@ pub struct EditorViewportRenderer {
     model_bind_group: wgpu::BindGroup,
     light_buffer: wgpu::Buffer,
     light_bind_group: wgpu::BindGroup,
+    /// Cloud shadow uniform buffer — uploaded each frame with cloud positions
+    /// so the PBR shader can compute analytical cloud shadows.
+    cloud_shadow_buffer: wgpu::Buffer,
     material_bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     #[allow(dead_code)]
@@ -307,6 +332,8 @@ pub struct EditorViewportRenderer {
     /// `resolve_pipeline` is `None` (e.g. shader failed to compile).
     resolve_bgl: wgpu::BindGroupLayout,
     resolve_bind_group: wgpu::BindGroup,
+    /// Uniform buffer for the resolve pass (sun screen position for god rays).
+    resolve_uniform_buffer: wgpu::Buffer,
     /// Sampler for the HDR resolve pass.
     resolve_sampler: wgpu::Sampler,
     gizmo_pipeline: Option<wgpu::RenderPipeline>,
@@ -483,6 +510,18 @@ impl EditorViewportRenderer {
                             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                             count: None,
                         },
+                        // binding 3: cloud shadow uniform (cloud positions for
+                        // analytical ray-sphere shadow computation)
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 3,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
                     ],
                 });
 
@@ -618,6 +657,13 @@ impl EditorViewportRenderer {
         let light_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
             label: Some("editor viewport light buffer"),
             size: std::mem::size_of::<EditorLightUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let cloud_shadow_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("editor viewport cloud shadow buffer"),
+            size: std::mem::size_of::<EditorCloudShadowUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -986,8 +1032,26 @@ impl EditorViewportRenderer {
                             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                             count: None,
                         },
+                        // binding 2: resolve uniform (sun screen pos for god rays)
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
                     ],
                 });
+
+        let resolve_uniform_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("resolve uniform buffer"),
+            size: std::mem::size_of::<ResolveUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let resolve_bind_group = device
             .as_ref()
@@ -1002,6 +1066,10 @@ impl EditorViewportRenderer {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: wgpu::BindingResource::Sampler(&resolve_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: resolve_uniform_buffer.as_entire_binding(),
                     },
                 ],
             });
@@ -1446,6 +1514,10 @@ impl EditorViewportRenderer {
                         binding: 2,
                         resource: wgpu::BindingResource::Sampler(&sky_light_sampler),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: cloud_shadow_buffer.as_entire_binding(),
+                    },
                 ],
             });
 
@@ -1461,6 +1533,7 @@ impl EditorViewportRenderer {
             model_bind_group,
             light_buffer,
             light_bind_group,
+            cloud_shadow_buffer,
             material_bind_group_layout: texture_bgl,
             sampler,
             fallback_texture,
@@ -1482,6 +1555,7 @@ impl EditorViewportRenderer {
             resolve_pipeline,
             resolve_bgl,
             resolve_bind_group,
+            resolve_uniform_buffer,
             resolve_sampler,
             gizmo_pipeline,
             gizmo_camera_buffer,
@@ -1773,6 +1847,10 @@ impl EditorViewportRenderer {
                         binding: 1,
                         resource: wgpu::BindingResource::Sampler(&self.resolve_sampler),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.resolve_uniform_buffer.as_entire_binding(),
+                    },
                 ],
             });
         }
@@ -1837,11 +1915,62 @@ impl EditorViewportRenderer {
             }),
         );
 
+        // Upload cloud shadow data — collect up to MAX_CLOUD_SHADOWS cloud
+        // positions so the PBR shader can compute analytical cloud shadows
+        // (ray-sphere intersection toward the sun).
+        let mut cloud_shadow = EditorCloudShadowUniform {
+            clouds: [[0.0; 4]; MAX_CLOUD_SHADOWS],
+            count: [0.0; 4],
+        };
+        let mut idx = 0;
+        for (_, (cloud, transform)) in simulation
+            .world()
+            .query::<(&pie_runtime::components::Cloud, &Transform)>()
+            .iter()
+        {
+            if idx >= MAX_CLOUD_SHADOWS {
+                break;
+            }
+            let center = transform.translation + Vec3::Y * cloud.altitude_offset;
+            cloud_shadow.clouds[idx] = [center.x, center.y, center.z, cloud.size * 0.5];
+            idx += 1;
+        }
+        cloud_shadow.count[0] = idx as f32;
+        self.queue.as_ref().write_buffer(
+            &self.cloud_shadow_buffer,
+            0,
+            bytemuck::bytes_of(&cloud_shadow),
+        );
+
+        // Compute the sun's screen position for god rays. Project a point
+        // far along the sun direction; if it's behind the camera (w < 0),
+        // god rays are disabled (intensity = 0).
+        let sun_dir = -dl.direction;
+        let cam_pos = camera_uniform.position;
+        let sun_world = Vec3::new(cam_pos[0], cam_pos[1], cam_pos[2]) + sun_dir * 1000.0;
+        let sun_clip = vp * Vec4::new(sun_world.x, sun_world.y, sun_world.z, 1.0);
+        let sun_ndc_x = if sun_clip.w.abs() > 1e-6 { sun_clip.x / sun_clip.w } else { 0.0 };
+        let sun_ndc_y = if sun_clip.w.abs() > 1e-6 { sun_clip.y / sun_clip.w } else { 0.0 };
+        // God ray intensity: 0 if sun is behind camera, else scaled by sun
+        // intensity and how central the sun is in the view.
+        let god_ray_intensity = if sun_clip.w > 0.0 {
+            dl.intensity.min(40.0) * 0.015
+        } else {
+            0.0
+        };
+        self.queue.as_ref().write_buffer(
+            &self.resolve_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&ResolveUniform {
+                sun_ndc: [sun_ndc_x, sun_ndc_y, god_ray_intensity, 0.0],
+            }),
+        );
+
         // Update sky atmosphere uniform from directional light.
         // The directional light's `direction` is the direction the light
         // *travels* (sun → scene); the sky shader expects the direction *to*
         // the sun (scene → sun), so we negate it before uploading.
-        let sun_dir = -dl.direction;
+        // (sun_dir was already computed above for the god ray uniform.)
         let (ray_samples, mie_samples) = self.sky_quality.sample_counts();
         self.queue.as_ref().write_buffer(
             &self.sky_uniform_buffer,
