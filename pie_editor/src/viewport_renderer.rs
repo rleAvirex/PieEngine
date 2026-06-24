@@ -201,6 +201,44 @@ struct LineColorUniform {
 /// Number of vertices for thick AABB wireframe (12 edges × 2 tris/face × 2 faces × 3 verts = 144)
 const SELECTION_VERTEX_COUNT: usize = 144;
 
+/// Wraps `device.create_render_pipeline` so a shader compile error or
+/// validation failure doesn't tear down the entire editor. wgpu's
+/// `create_render_pipeline` panics on validation errors (bad shader, bind
+/// group layout mismatch, etc.) — we catch the panic, log it, and return
+/// `None`. The caller stores `Option<RenderPipeline>` and skips the
+/// corresponding render pass at draw time if `None`.
+///
+/// This is the single most important decoupling change: previously one bad
+/// shader would prevent the entire `EditorViewportRenderer` from
+/// constructing, leaving the user with no viewport at all.
+fn try_create_render_pipeline(
+    device: &wgpu::Device,
+    descriptor: &wgpu::RenderPipelineDescriptor,
+) -> Option<wgpu::RenderPipeline> {
+    let label = descriptor.label.map(|s| s.to_string()).unwrap_or_default();
+    // wgpu validates lazily on some backends, but `create_render_pipeline`
+    // is synchronous on the most common ones (Vulkan, Metal, DX12) and
+    // panics on validation failure. catch_unwind captures it.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        device.create_render_pipeline(descriptor)
+    })) {
+        Ok(pipeline) => Some(pipeline),
+        Err(payload) => {
+            let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
+                s.to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "(unknown panic message)".to_string()
+            };
+            eprintln!(
+                "viewport: pipeline '{label}' failed to create — skipping. Error: {msg}"
+            );
+            None
+        }
+    }
+}
+
 struct UploadedEditorTexture {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -213,7 +251,7 @@ struct UploadedEditorTexture {
 pub struct EditorViewportRenderer {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
-    pipeline: wgpu::RenderPipeline,
+    pipeline: Option<wgpu::RenderPipeline>,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     /// Separate camera uniform buffer for the sky-light cubemap capture pass.
@@ -241,18 +279,22 @@ pub struct EditorViewportRenderer {
     depth_texture: wgpu::Texture,
     depth_texture_view: wgpu::TextureView,
     depth_size: [u32; 2],
-    line_pipeline: wgpu::RenderPipeline,
+    line_pipeline: Option<wgpu::RenderPipeline>,
     line_camera_buffer: wgpu::Buffer,
     line_camera_bind_group: wgpu::BindGroup,
     line_color_buffer: wgpu::Buffer,
     line_color_bind_group: wgpu::BindGroup,
     selection_vertex_buffer: wgpu::Buffer,
     /// Resolve pipeline: fullscreen blit from HDR texture to sRGB swapchain.
-    resolve_pipeline: wgpu::RenderPipeline,
+    resolve_pipeline: Option<wgpu::RenderPipeline>,
+    /// Bind group layout for the resolve pass — kept separately so the
+    /// resolve bind group can be recreated on resize even if
+    /// `resolve_pipeline` is `None` (e.g. shader failed to compile).
+    resolve_bgl: wgpu::BindGroupLayout,
     resolve_bind_group: wgpu::BindGroup,
     /// Sampler for the HDR resolve pass.
     resolve_sampler: wgpu::Sampler,
-    gizmo_pipeline: wgpu::RenderPipeline,
+    gizmo_pipeline: Option<wgpu::RenderPipeline>,
     gizmo_camera_buffer: wgpu::Buffer,
     gizmo_camera_bind_group: wgpu::BindGroup,
     gizmo_vertex_buffer: wgpu::Buffer,
@@ -262,7 +304,7 @@ pub struct EditorViewportRenderer {
     /// FBX-loaded gizmo mesh data for the scale/sphere gizmo.
     fbx_gizmo_sphere: Option<(Vec<pie_runtime::assets::MeshVertex>, Vec<u32>)>,
     // -- Sky atmosphere --
-    sky_pipeline: wgpu::RenderPipeline,
+    sky_pipeline: Option<wgpu::RenderPipeline>,
     sky_uniform_buffer: wgpu::Buffer,
     sky_bind_group: wgpu::BindGroup,
     /// Whether the sky atmosphere is enabled.
@@ -431,9 +473,9 @@ impl EditorViewportRenderer {
                     push_constant_ranges: &[],
                 });
 
-        let pipeline = device
-            .as_ref()
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = try_create_render_pipeline(
+            device.as_ref(),
+            &wgpu::RenderPipelineDescriptor {
                 label: Some("editor viewport pipeline"),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
@@ -499,7 +541,8 @@ impl EditorViewportRenderer {
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
                 cache: None,
-            });
+            },
+        );
 
         let camera_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
             label: Some("editor viewport camera buffer"),
@@ -657,14 +700,13 @@ impl EditorViewportRenderer {
                     push_constant_ranges: &[],
                 });
 
-        let line_pipeline =
-            device
-                .as_ref()
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("editor viewport line pipeline"),
-                    layout: Some(&line_pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &line_shader,
+        let line_pipeline = try_create_render_pipeline(
+            device.as_ref(),
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("editor viewport line pipeline"),
+                layout: Some(&line_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &line_shader,
                         entry_point: Some("vs_main"),
                         buffers: &[wgpu::VertexBufferLayout {
                             array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
@@ -706,7 +748,8 @@ impl EditorViewportRenderer {
                     multisample: wgpu::MultisampleState::default(),
                     multiview: None,
                     cache: None,
-                });
+                },
+            );
 
         let line_camera_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
             label: Some("editor viewport line camera buffer"),
@@ -786,16 +829,15 @@ impl EditorViewportRenderer {
                     push_constant_ranges: &[],
                 });
 
-        let gizmo_pipeline =
-            device
-                .as_ref()
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("editor viewport gizmo pipeline"),
-                    layout: Some(&gizmo_pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &gizmo_shader,
-                        entry_point: Some("vs_main"),
-                        buffers: &[wgpu::VertexBufferLayout {
+        let gizmo_pipeline = try_create_render_pipeline(
+            device.as_ref(),
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("editor viewport gizmo pipeline"),
+                layout: Some(&gizmo_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &gizmo_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[wgpu::VertexBufferLayout {
                             array_stride: std::mem::size_of::<GizmoVertex>() as wgpu::BufferAddress,
                             step_mode: wgpu::VertexStepMode::Vertex,
                             attributes: &[
@@ -842,7 +884,8 @@ impl EditorViewportRenderer {
                     multisample: wgpu::MultisampleState::default(),
                     multiview: None,
                     cache: None,
-                });
+                },
+            );
 
         let gizmo_camera_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
             label: Some("editor viewport gizmo camera buffer"),
@@ -945,16 +988,15 @@ impl EditorViewportRenderer {
                     push_constant_ranges: &[],
                 });
 
-        let resolve_pipeline =
-            device
-                .as_ref()
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("HDR resolve pipeline"),
-                    layout: Some(&resolve_pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &resolve_shader,
-                        entry_point: Some("vs_main"),
-                        buffers: &[],
+        let resolve_pipeline = try_create_render_pipeline(
+            device.as_ref(),
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("HDR resolve pipeline"),
+                layout: Some(&resolve_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &resolve_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
                         compilation_options: Default::default(),
                     },
                     fragment: Some(wgpu::FragmentState {
@@ -986,7 +1028,8 @@ impl EditorViewportRenderer {
                     multisample: wgpu::MultisampleState::default(),
                     multiview: None,
                     cache: None,
-                });
+                },
+            );
 
         // -- Sky atmosphere pipeline --
         let sky_shader_source =
@@ -1045,15 +1088,14 @@ impl EditorViewportRenderer {
                     push_constant_ranges: &[],
                 });
 
-        let sky_pipeline =
-            device
-                .as_ref()
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("sky atmosphere pipeline"),
-                    layout: Some(&sky_pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &sky_shader,
-                        entry_point: Some("vs_main"),
+        let sky_pipeline = try_create_render_pipeline(
+            device.as_ref(),
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("sky atmosphere pipeline"),
+                layout: Some(&sky_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &sky_shader,
+                    entry_point: Some("vs_main"),
                         buffers: &[],
                         compilation_options: Default::default(),
                     },
@@ -1086,7 +1128,8 @@ impl EditorViewportRenderer {
                     multisample: wgpu::MultisampleState::default(),
                     multiview: None,
                     cache: None,
-                });
+                },
+            );
 
         let sky_uniform_buffer = device.as_ref().create_buffer(&wgpu::BufferDescriptor {
             label: Some("sky uniform buffer"),
@@ -1242,6 +1285,7 @@ impl EditorViewportRenderer {
             line_color_bind_group,
             selection_vertex_buffer,
             resolve_pipeline,
+            resolve_bgl,
             resolve_bind_group,
             resolve_sampler,
             gizmo_pipeline,
@@ -1355,15 +1399,43 @@ impl EditorViewportRenderer {
             .query::<&pie_runtime::components::MeshRenderer>()
             .iter()
         {
-            let mesh = registry
-                .mesh(mesh_renderer.mesh)
-                .map_err(|e| e.to_string())?;
-            let material = registry
-                .material(mesh.material)
-                .map_err(|e| e.to_string())?;
+            // Per-drawable fallback: if any single asset fails to load or
+            // upload, skip that drawable and keep going. Previously a single
+            // bad mesh/material/texture would fail the ENTIRE scene via `?`
+            // propagation. Now the rest of the scene still renders.
+            let mesh = match registry.mesh(mesh_renderer.mesh) {
+                Ok(m) => m,
+                Err(error) => {
+                    eprintln!(
+                        "viewport: skipping drawable {:?} — mesh load failed: {}",
+                        entity, error
+                    );
+                    continue;
+                }
+            };
+            let material = match registry.material(mesh.material) {
+                Ok(m) => m,
+                Err(error) => {
+                    eprintln!(
+                        "viewport: skipping drawable {:?} — material load failed: {}",
+                        entity, error
+                    );
+                    continue;
+                }
+            };
             if !self.materials.contains_key(&mesh.material) {
-                self.materials
-                    .insert(mesh.material, self.upload_material(registry, material)?);
+                match self.upload_material(registry, material) {
+                    Ok(gpu_mat) => {
+                        self.materials.insert(mesh.material, gpu_mat);
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "viewport: skipping drawable {:?} — material upload failed: {}",
+                            entity, error
+                        );
+                        continue;
+                    }
+                }
             }
             drawables.push(EditorGpuDrawable {
                 entity,
@@ -1475,9 +1547,9 @@ impl EditorViewportRenderer {
         hovered_axis: Option<Axis>,
         hovered_center: bool,
         gizmo_state: GizmoState,
-    ) {
+    ) -> Result<(), String> {
         if size[0] == 0 || size[1] == 0 {
-            return;
+            return Ok(());
         }
 
         // Resize HDR and depth textures if viewport size changed
@@ -1489,7 +1561,7 @@ impl EditorViewportRenderer {
             // Recreate resolve bind group with new HDR texture view
             self.resolve_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("HDR resolve bind group (resized)"),
-                layout: &self.resolve_pipeline.get_bind_group_layout(0),
+                layout: &self.resolve_bgl,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -1633,7 +1705,7 @@ impl EditorViewportRenderer {
             let should_capture = self.sky_light_dirty
                 || (sky_light.real_time_capture && throttle_mod == 0);
 
-            if should_capture && self.sky_enabled {
+            if should_capture && self.sky_enabled && self.sky_pipeline.is_some() {
                 // Cubemap face directions: +X, -X, +Y, -Y, +Z, -Z.
                 // The `forward` and `up` vectors follow the Vulkan/WebGPU cube
                 // convention so the captured faces sample correctly in the PBR
@@ -1747,7 +1819,7 @@ impl EditorViewportRenderer {
                         timestamp_writes: None,
                         occlusion_query_set: None,
                     });
-                    rp.set_pipeline(&self.sky_pipeline);
+                    rp.set_pipeline(self.sky_pipeline.as_ref().unwrap());
                     // Use the cubemap-specific bind group so we don't clobber
                     // the main camera buffer (and don't need to restore it).
                     // Dynamic offset selects this face's slot in
@@ -1770,6 +1842,10 @@ impl EditorViewportRenderer {
         // Outputs linear HDR values. Runs before the scene so depth test
         // ensures geometry occludes the sky.
         if self.sky_enabled {
+            // If the sky pipeline failed to compile, still clear the HDR
+            // texture so Pass 1 doesn't Load stale/garbage data — just
+            // skip the actual sky draw.
+            let sky_pipeline = self.sky_pipeline.as_ref();
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("editor sky atmosphere pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1791,9 +1867,11 @@ impl EditorViewportRenderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            rp.set_pipeline(&self.sky_pipeline);
-            rp.set_bind_group(0, &self.sky_bind_group, &[0]);
-            rp.draw(0..3, 0..1);
+            if let Some(pipeline) = sky_pipeline {
+                rp.set_pipeline(pipeline);
+                rp.set_bind_group(0, &self.sky_bind_group, &[0]);
+                rp.draw(0..3, 0..1);
+            }
         }
 
         // ====================================================================
@@ -1827,9 +1905,13 @@ impl EditorViewportRenderer {
                 occlusion_query_set: None,
             });
 
-            rp.set_pipeline(&self.pipeline);
-            rp.set_bind_group(0, &self.camera_bind_group, &[]);
-            rp.set_bind_group(2, &self.light_bind_group, &[]);
+            // If the PBR pipeline failed to compile, skip the scene draw —
+            // the sky (or the clear from Pass 0) remains visible. The render
+            // pass still runs so depth is cleared for Pass 2 overlays.
+            if let Some(pipeline) = self.pipeline.as_ref() {
+                rp.set_pipeline(pipeline);
+                rp.set_bind_group(0, &self.camera_bind_group, &[]);
+                rp.set_bind_group(2, &self.light_bind_group, &[]);
 
             // Pre-compute per-drawable model uniforms into a staging buffer so
             // we can issue a single `queue.write_buffer` for ALL drawables
@@ -1887,6 +1969,7 @@ impl EditorViewportRenderer {
                 rp.set_index_buffer(d.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..d.mesh.index_count, 0, 0..1);
             }
+            } // end if let Some(pipeline)
         }
 
         // ====================================================================
@@ -1917,25 +2000,31 @@ impl EditorViewportRenderer {
                 occlusion_query_set: None,
             });
 
-            // Resolve: blit HDR scene to sRGB swapchain
-            rp.set_pipeline(&self.resolve_pipeline);
-            rp.set_bind_group(0, &self.resolve_bind_group, &[]);
-            rp.draw(0..3, 0..1);
+            // Resolve: blit HDR scene to sRGB swapchain. If the resolve
+            // pipeline failed to compile, the swapchain stays black — the
+            // user sees that something is wrong but the editor doesn't crash.
+            if let Some(pipeline) = self.resolve_pipeline.as_ref() {
+                rp.set_pipeline(pipeline);
+                rp.set_bind_group(0, &self.resolve_bind_group, &[]);
+                rp.draw(0..3, 0..1);
+            }
 
-            // Selection highlight overlay
+            // Selection highlight overlay — skipped if line_pipeline failed
             if selection_aabb.is_some() {
-                self.queue.as_ref().write_buffer(
-                    &self.line_color_buffer,
-                    0,
-                    bytemuck::bytes_of(&LineColorUniform {
-                        color: [1.0, 0.5, 0.0, 1.0],
-                    }),
-                );
-                rp.set_pipeline(&self.line_pipeline);
-                rp.set_bind_group(0, &self.line_camera_bind_group, &[]);
-                rp.set_bind_group(1, &self.line_color_bind_group, &[]);
-                rp.set_vertex_buffer(0, self.selection_vertex_buffer.slice(..));
-                rp.draw(0..SELECTION_VERTEX_COUNT as u32, 0..1);
+                if let Some(pipeline) = self.line_pipeline.as_ref() {
+                    self.queue.as_ref().write_buffer(
+                        &self.line_color_buffer,
+                        0,
+                        bytemuck::bytes_of(&LineColorUniform {
+                            color: [1.0, 0.5, 0.0, 1.0],
+                        }),
+                    );
+                    rp.set_pipeline(pipeline);
+                    rp.set_bind_group(0, &self.line_camera_bind_group, &[]);
+                    rp.set_bind_group(1, &self.line_color_bind_group, &[]);
+                    rp.set_vertex_buffer(0, self.selection_vertex_buffer.slice(..));
+                    rp.draw(0..SELECTION_VERTEX_COUNT as u32, 0..1);
+                }
             }
 
             // Gizmo overlay
@@ -1974,21 +2063,23 @@ impl EditorViewportRenderer {
                     )
                 };
                 if !gizmo_verts.is_empty() && gizmo_verts.len() <= self.gizmo_vertex_capacity {
-                    let bytes: &[u8] = bytemuck::cast_slice(&gizmo_verts);
-                    self.queue
-                        .as_ref()
-                        .write_buffer(&self.gizmo_vertex_buffer, 0, bytes);
-                    self.queue.as_ref().write_buffer(
-                        &self.gizmo_camera_buffer,
-                        0,
-                        bytemuck::bytes_of(&LineCameraUniform {
-                            view_proj: vp.to_cols_array_2d(),
-                        }),
-                    );
-                    rp.set_pipeline(&self.gizmo_pipeline);
-                    rp.set_bind_group(0, &self.gizmo_camera_bind_group, &[]);
-                    rp.set_vertex_buffer(0, self.gizmo_vertex_buffer.slice(..));
-                    rp.draw(0..gizmo_verts.len() as u32, 0..1);
+                    if let Some(pipeline) = self.gizmo_pipeline.as_ref() {
+                        let bytes: &[u8] = bytemuck::cast_slice(&gizmo_verts);
+                        self.queue
+                            .as_ref()
+                            .write_buffer(&self.gizmo_vertex_buffer, 0, bytes);
+                        self.queue.as_ref().write_buffer(
+                            &self.gizmo_camera_buffer,
+                            0,
+                            bytemuck::bytes_of(&LineCameraUniform {
+                                view_proj: vp.to_cols_array_2d(),
+                            }),
+                        );
+                        rp.set_pipeline(pipeline);
+                        rp.set_bind_group(0, &self.gizmo_camera_bind_group, &[]);
+                        rp.set_vertex_buffer(0, self.gizmo_vertex_buffer.slice(..));
+                        rp.draw(0..gizmo_verts.len() as u32, 0..1);
+                    }
                 }
             }
         }
@@ -1996,6 +2087,7 @@ impl EditorViewportRenderer {
         self.queue
             .as_ref()
             .submit(std::iter::once(encoder.finish()));
+        Ok(())
     }
 }
 

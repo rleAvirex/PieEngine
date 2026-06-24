@@ -106,16 +106,26 @@ impl ApplicationHandler for ClientApp {
             .with_title("Pie Engine")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
 
-        let window = Arc::new(
-            event_loop
-                .create_window(window_attributes)
-                .expect("window should be created"),
-        );
+        let window = match event_loop.create_window(window_attributes) {
+            Ok(window) => Arc::new(window),
+            Err(error) => {
+                eprintln!("pie_runtime: failed to create window: {error}");
+                return;
+            }
+        };
 
         // Create the loading screen — this sets up the GPU and shows a
         // progress indicator immediately, before loading any scene assets.
-        let loading_screen =
-            LoadingScreen::new(window.clone()).expect("loading screen should initialize");
+        // If GPU initialization fails (no adapter, no device, etc.), log
+        // and bail — previously this .expect()ed and tore down the event
+        // loop with no diagnostic.
+        let loading_screen = match LoadingScreen::new(window.clone()) {
+            Ok(ls) => ls,
+            Err(error) => {
+                eprintln!("pie_runtime: failed to initialize loading screen: {error}");
+                return;
+            }
+        };
 
         self.window = Some(window);
         self.loading_screen = Some(loading_screen);

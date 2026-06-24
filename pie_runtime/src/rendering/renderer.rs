@@ -54,6 +54,36 @@ const MAX_DRAWABLES: usize = 4096;
 /// `(index * MODEL_UNIFORM_STRIDE)` stays 256-aligned.
 const MODEL_UNIFORM_STRIDE: usize = 256;
 
+/// Wraps `device.create_render_pipeline` so a shader compile error or
+/// validation failure doesn't tear down the entire runtime renderer.
+/// Returns `None` on failure (logs the error); the caller skips the
+/// scene pass if `None`. This decouples "shader is broken" from
+/// "renderer can't start at all".
+fn try_create_render_pipeline(
+    device: &wgpu::Device,
+    descriptor: &wgpu::RenderPipelineDescriptor,
+) -> Option<wgpu::RenderPipeline> {
+    let label = descriptor.label.map(|s| s.to_string()).unwrap_or_default();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        device.create_render_pipeline(descriptor)
+    })) {
+        Ok(pipeline) => Some(pipeline),
+        Err(payload) => {
+            let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
+                s.to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "(unknown panic message)".to_string()
+            };
+            eprintln!(
+                "renderer: pipeline '{label}' failed to create — skipping. Error: {msg}"
+            );
+            None
+        }
+    }
+}
+
 fn create_depth_texture(
     device: &wgpu::Device,
     width: u32,
@@ -101,7 +131,7 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    pipeline: wgpu::RenderPipeline,
+    pipeline: Option<wgpu::RenderPipeline>,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     model_buffer: wgpu::Buffer,
@@ -313,7 +343,7 @@ impl Renderer {
             push_constant_ranges: &[],
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = try_create_render_pipeline(&device, &wgpu::RenderPipelineDescriptor {
             label: Some("pbr mesh pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -600,16 +630,44 @@ impl Renderer {
         let mut drawables = Vec::new();
 
         for (entity, mesh_renderer) in simulation.world().query::<&MeshRenderer>().iter() {
-            let mesh = registry
-                .mesh(mesh_renderer.mesh)
-                .map_err(|error| error.to_string())?;
-            let material = registry
-                .material(mesh.material)
-                .map_err(|error| error.to_string())?;
+            // Per-drawable fallback: if any single asset fails to load or
+            // upload, skip that drawable and keep going. Previously a single
+            // bad mesh/material/texture would fail the ENTIRE scene via `?`
+            // propagation. Now the rest of the scene still renders.
+            let mesh = match registry.mesh(mesh_renderer.mesh) {
+                Ok(m) => m,
+                Err(error) => {
+                    eprintln!(
+                        "renderer: skipping drawable {:?} — mesh load failed: {}",
+                        entity, error
+                    );
+                    continue;
+                }
+            };
+            let material = match registry.material(mesh.material) {
+                Ok(m) => m,
+                Err(error) => {
+                    eprintln!(
+                        "renderer: skipping drawable {:?} — material load failed: {}",
+                        entity, error
+                    );
+                    continue;
+                }
+            };
 
             if !self.materials.contains_key(&mesh.material) {
-                self.materials
-                    .insert(mesh.material, self.upload_material(registry, material)?);
+                match self.upload_material(registry, material) {
+                    Ok(gpu_mat) => {
+                        self.materials.insert(mesh.material, gpu_mat);
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "renderer: skipping drawable {:?} — material upload failed: {}",
+                            entity, error
+                        );
+                        continue;
+                    }
+                }
             }
 
             drawables.push(GpuDrawable {
@@ -820,25 +878,40 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            render_pass.set_bind_group(2, &self.light_bind_group, &[]);
+            // If the PBR pipeline failed to compile, skip the scene draw —
+            // the render pass still runs (clearing the swapchain) so the
+            // user sees a black screen instead of a crash.
+            if let Some(pipeline) = self.pipeline.as_ref() {
+                render_pass.set_pipeline(pipeline);
+                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                render_pass.set_bind_group(2, &self.light_bind_group, &[]);
 
-            for (index, drawable) in self.drawables.iter().enumerate().take(drawable_count) {
-                if index >= MAX_DRAWABLES {
-                    break;
-                }
-                // Address this drawable's slot in the model uniform buffer via
-                // dynamic offset. This is processed by the render pass at draw
-                // time (not as a separate queue op), so each draw reads the
-                // correct matrix. The stride is 256 (not sizeof(ModelUniform)
+                for (index, drawable) in self.drawables.iter().enumerate().take(drawable_count) {
+                    if index >= MAX_DRAWABLES {
+                        break;
+                    }
+                    // Address this drawable's slot in the model uniform buffer via
+                    // dynamic offset. This is processed by the render pass at draw
+                    // time (not as a separate queue op), so each draw reads the
+                    // correct matrix. The stride is 256 (not sizeof(ModelUniform)
                 // = 128) to satisfy wgpu's min_uniform_buffer_offset_alignment.
                 let dynamic_offset = (index * MODEL_UNIFORM_STRIDE) as u32;
                 render_pass.set_bind_group(1, &self.model_bind_group, &[dynamic_offset]);
-                let material = self
-                    .materials
-                    .get(&drawable.material)
-                    .expect("scene materials should be uploaded before rendering");
+                // Graceful skip if a drawable's material is missing at render
+                // time (e.g. the asset was unloaded after load_scene). The
+                // previous version .expect()ed here, which would panic mid-
+                // frame and tear down the event loop. Skipping is safe: we
+                // just don't issue the draw call for this drawable.
+                let material = match self.materials.get(&drawable.material) {
+                    Some(m) => m,
+                    None => {
+                        eprintln!(
+                            "renderer: skipping drawable {:?} at render — material missing",
+                            drawable.entity
+                        );
+                        continue;
+                    }
+                };
                 render_pass.set_bind_group(3, &material.bind_group, &[]);
                 render_pass.set_vertex_buffer(0, drawable.mesh.vertex_buffer.slice(..));
                 render_pass.set_index_buffer(
@@ -846,7 +919,8 @@ impl Renderer {
                     wgpu::IndexFormat::Uint32,
                 );
                 render_pass.draw_indexed(0..drawable.mesh.index_count, 0, 0..1);
-            }
+                }
+            } // end if let Some(pipeline)
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

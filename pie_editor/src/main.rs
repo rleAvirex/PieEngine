@@ -495,7 +495,7 @@ impl EditorApp {
             return;
         };
 
-        viewport_renderer.render_to_view(
+        if let Err(error) = viewport_renderer.render_to_view(
             self.runtime.simulation(),
             &viewport_texture.view,
             viewport_texture.size,
@@ -504,7 +504,9 @@ impl EditorApp {
             self.hovered_axis,
             self.hovered_center,
             self.gizmo_state,
-        );
+        ) {
+            eprintln!("editor: viewport render failed: {error}");
+        }
     }
 
     fn request_redraw(&self) {
