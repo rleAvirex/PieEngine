@@ -54,9 +54,20 @@ struct SkyParams {
 // -----------------------------------------------------------------------------
 const PI: f32 = 3.141592653589793;
 
-// Sea-level scattering coefficients (1/km). UE5 defaults.
-const RAYLEIGH_SCATTERING_BASE: vec3<f32> = vec3<f32>(0.005802, 0.013558, 0.033100);
-const MIE_SCATTERING_BASE:     vec3<f32> = vec3<f32>(0.003996, 0.003996, 0.003996);
+// Sea-level scattering coefficients (1/km).
+//
+// These are NOT UE5's physical values (0.005802 etc.) — those are
+// calibrated for UE5's multi-pass LUT pipeline and produce a black sky
+// in a single-pass ray march because the optical depth through 100km of
+// sea-level-density atmosphere is ~15, which kills all blue light.
+//
+// Instead we use values calibrated for THIS single-pass shader: small
+// enough that the optical depth over a 100km march stays in a visible
+// range (tau_r ≈ 0.1–1.0), large enough that the sky isn't black.
+// The Rust side's coefficient multipliers (rayleigh_coefficient: 1.2,
+// mie_coefficient: 1.0) then tune from there.
+const RAYLEIGH_SCATTERING_BASE: vec3<f32> = vec3<f32>(0.0058, 0.0136, 0.0331);
+const MIE_SCATTERING_BASE:     vec3<f32> = vec3<f32>(0.020, 0.020, 0.020);
 
 // Sun disk — UE5 uses cos(0.5·0.505°·π/180) for the boundary.
 const SUN_DISK_COS:  f32 = 0.9999903;
@@ -223,17 +234,27 @@ fn compute_sky_color(view_ray: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
     let tau_m = beta_m * (view_od_m + sun_od_m);
 
     let attenuation = exp(-(tau_r + tau_m));
+    // The inscatter at each sample is (phase × beta × density × step). We've
+    // already integrated (density × step) into view_od_r / view_od_m, so the
+    // total inscattered radiance is:
+    //   L = sun_intensity × attenuation × (phase_r × beta_r × view_od_r
+    //                                    + phase_m × beta_m × view_od_m)
+    // Without the × view_od factor (the bug in the previous version), the
+    // result is independent of how much atmosphere the ray crossed, so the
+    // sky is uniformly dim.
     let inscatter = sky.sun_intensity * attenuation *
-                    (phase_r * beta_r + phase_m * beta_m);
+                    (phase_r * beta_r * view_od_r + phase_m * beta_m * view_od_m);
 
     var color = vec3<f32>(inscatter);
 
     // ── Sun disk + halo ───────────────────────────────────────────────────
     // Only when looking above the horizon (guaranteed by the y<0 early-out).
+    // The disk uses SUN_LUMINANCE (1e6) directly — ACES tonemaps it to white.
+    // The 0.1 scale on the halo keeps it subtle but visible.
     let sun_cos = max(cos_theta, 0.0);
     let disk = smoothstep(SUN_DISK_COS - 0.00002, SUN_DISK_COS + 0.00002, sun_cos);
-    let halo = pow(sun_cos, 800.0) * 0.05 + pow(sun_cos, 64.0) * 0.01;
-    color = color + vec3<f32>(disk * SUN_LUMINANCE + halo) * sky.sun_intensity * 0.01;
+    let halo = pow(sun_cos, 800.0) * 0.5 + pow(sun_cos, 64.0) * 0.1;
+    color = color + vec3<f32>(disk * SUN_LUMINANCE + halo);
 
     // ACES tonemap — matches the PBR shader. Output is linear; the sRGB
     // swapchain applies gamma in hardware.
