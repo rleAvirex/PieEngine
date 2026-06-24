@@ -1570,12 +1570,12 @@ impl EditorViewportRenderer {
             bytemuck::bytes_of(&EditorSkyUniform {
                 sun_direction: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
                 sun_intensity: dl.intensity.max(1.0),
-                // Scattering multipliers — tuned for visual impact rather than
-                // physical accuracy. The base coefficients in the shader are
-                // ~5.5e-6 (Rayleigh) and ~2e-5 (Mie), so these multipliers
-                // bring the values into a visible range.
-                rayleigh_coefficient: 800.0,
-                mie_coefficient: 400.0,
+                // Multipliers on the physically-based sea-level scattering
+                // coefficients (km⁻¹) declared in the shader. 1.0 = natural
+                // Earth atmosphere. Bump slightly above 1.0 for a more
+                // vibrant UE5-style look.
+                rayleigh_coefficient: 1.2,
+                mie_coefficient: 1.0,
                 rayleigh_scale_height: 8.0,
                 mie_scale_height: 1.2,
                 mie_directionality: 0.8,
