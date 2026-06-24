@@ -558,7 +558,12 @@ impl EditorViewportRenderer {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            // Linear mipmap filtering is required to avoid severe aliasing /
+            // shimmering when textured surfaces are viewed at grazing angles
+            // (e.g. the sample cube's checkerboard albedo viewed from near the
+            // horizon). With Nearest and no mipmaps, the top face shimmers
+            // into a repeating screen-space checkerboard as the camera moves.
+            mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
@@ -2017,6 +2022,19 @@ fn upload_editor_texture(
     queue: &wgpu::Queue,
     texture: &pie_runtime::assets::TextureAsset,
 ) -> UploadedEditorTexture {
+    // Compute the mip level count from the texture dimensions. We generate
+    // a full mip chain on the CPU (box filter) at load time so the sampler's
+    // Linear mipmap filter actually has data to work with. Without mipmaps,
+    // textured surfaces viewed at grazing angles (e.g. the sample cube's
+    // checkerboard albedo from near the horizon) alias into a shimmering
+    // screen-space checkerboard pattern.
+    let max_dim = texture.width.max(texture.height);
+    let mip_level_count = if max_dim <= 1 {
+        1u32
+    } else {
+        32u32 - (max_dim - 1).leading_zeros()
+    };
+
     let gt = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("editor viewport loaded texture"),
         size: wgpu::Extent3d {
@@ -2024,7 +2042,7 @@ fn upload_editor_texture(
             height: texture.height,
             depth_or_array_layers: 1,
         },
-        mip_level_count: 1,
+        mip_level_count,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -2050,7 +2068,81 @@ fn upload_editor_texture(
             depth_or_array_layers: 1,
         },
     );
-    let view = gt.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // Generate the rest of the mip chain on the CPU using a 2×2 box filter.
+    // Each level is half the previous level's dimensions (rounded down).
+    // The data is small (≤512² source) so this is cheap at load time.
+    let mut level_w = texture.width;
+    let mut level_h = texture.height;
+    let mut level_data = texture.rgba.clone();
+    for level in 1..mip_level_count {
+        let prev_w = level_w;
+        let prev_h = level_h;
+        level_w = (level_w + 1) / 2;
+        level_h = (level_h + 1) / 2;
+        // Stop if we can't shrink further.
+        if level_w == prev_w && level_h == prev_h {
+            break;
+        }
+        let mut next = vec![0u8; (level_w * level_h) as usize * 4];
+        for y in 0..level_h {
+            for x in 0..level_w {
+                // 2×2 box filter: average the four corresponding texels from
+                // the previous level. Handles non-power-of-two source sizes by
+                // clamping the source coordinates.
+                let x0 = (x * 2) as usize;
+                let x1 = ((x * 2 + 1) as usize).min(prev_w as usize - 1);
+                let y0 = (y * 2) as usize;
+                let y1 = ((y * 2 + 1) as usize).min(prev_h as usize - 1);
+                let stride_prev = prev_w as usize * 4;
+                let mut acc = [0u32; 4];
+                let samples = [
+                    (y0, x0),
+                    (y0, x1),
+                    (y1, x0),
+                    (y1, x1),
+                ];
+                for &(sy, sx) in samples.iter() {
+                    let off = sy * stride_prev + sx * 4;
+                    acc[0] += level_data[off] as u32;
+                    acc[1] += level_data[off + 1] as u32;
+                    acc[2] += level_data[off + 2] as u32;
+                    acc[3] += level_data[off + 3] as u32;
+                }
+                let dst_off = (y as usize * level_w as usize + x as usize) * 4;
+                next[dst_off]     = (acc[0] / 4) as u8;
+                next[dst_off + 1] = (acc[1] / 4) as u8;
+                next[dst_off + 2] = (acc[2] / 4) as u8;
+                next[dst_off + 3] = (acc[3] / 4) as u8;
+            }
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &gt,
+                mip_level: level,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &next,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * level_w),
+                rows_per_image: Some(level_h),
+            },
+            wgpu::Extent3d {
+                width: level_w,
+                height: level_h,
+                depth_or_array_layers: 1,
+            },
+        );
+        level_data = next;
+    }
+
+    // Create a view that exposes the full mip chain.
+    let view = gt.create_view(&wgpu::TextureViewDescriptor {
+        mip_level_count: Some(mip_level_count),
+        ..Default::default()
+    });
     UploadedEditorTexture { texture: gt, view }
 }
 

@@ -520,7 +520,9 @@ impl Renderer {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            // Linear mipmap filtering — without it, textured surfaces viewed
+            // at grazing angles alias into a shimmering checkerboard.
+            mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
@@ -883,6 +885,18 @@ fn upload_texture(
     queue: &wgpu::Queue,
     texture: &crate::assets::TextureAsset,
 ) -> UploadedTexture {
+    // Generate a full mip chain on the CPU (2×2 box filter) at load time so
+    // the sampler's Linear mipmap filter has data to work with. Without
+    // mipmaps, textured surfaces viewed at grazing angles (e.g. a checkerboard
+    // albedo from near the horizon) alias into a shimmering screen-space
+    // checkerboard pattern as the camera moves.
+    let max_dim = texture.width.max(texture.height);
+    let mip_level_count = if max_dim <= 1 {
+        1u32
+    } else {
+        32u32 - (max_dim - 1).leading_zeros()
+    };
+
     let gpu_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("loaded texture"),
         size: wgpu::Extent3d {
@@ -890,7 +904,7 @@ fn upload_texture(
             height: texture.height,
             depth_or_array_layers: 1,
         },
-        mip_level_count: 1,
+        mip_level_count,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -918,7 +932,68 @@ fn upload_texture(
         },
     );
 
-    let view = gpu_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    // Generate remaining mip levels on the CPU.
+    let mut level_w = texture.width;
+    let mut level_h = texture.height;
+    let mut level_data = texture.rgba.clone();
+    for level in 1..mip_level_count {
+        let prev_w = level_w;
+        let prev_h = level_h;
+        level_w = (level_w + 1) / 2;
+        level_h = (level_h + 1) / 2;
+        if level_w == prev_w && level_h == prev_h {
+            break;
+        }
+        let mut next = vec![0u8; (level_w * level_h) as usize * 4];
+        for y in 0..level_h {
+            for x in 0..level_w {
+                let x0 = (x * 2) as usize;
+                let x1 = ((x * 2 + 1) as usize).min(prev_w as usize - 1);
+                let y0 = (y * 2) as usize;
+                let y1 = ((y * 2 + 1) as usize).min(prev_h as usize - 1);
+                let stride_prev = prev_w as usize * 4;
+                let mut acc = [0u32; 4];
+                let samples = [(y0, x0), (y0, x1), (y1, x0), (y1, x1)];
+                for &(sy, sx) in samples.iter() {
+                    let off = sy * stride_prev + sx * 4;
+                    acc[0] += level_data[off] as u32;
+                    acc[1] += level_data[off + 1] as u32;
+                    acc[2] += level_data[off + 2] as u32;
+                    acc[3] += level_data[off + 3] as u32;
+                }
+                let dst_off = (y as usize * level_w as usize + x as usize) * 4;
+                next[dst_off]     = (acc[0] / 4) as u8;
+                next[dst_off + 1] = (acc[1] / 4) as u8;
+                next[dst_off + 2] = (acc[2] / 4) as u8;
+                next[dst_off + 3] = (acc[3] / 4) as u8;
+            }
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &gpu_texture,
+                mip_level: level,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &next,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * level_w),
+                rows_per_image: Some(level_h),
+            },
+            wgpu::Extent3d {
+                width: level_w,
+                height: level_h,
+                depth_or_array_layers: 1,
+            },
+        );
+        level_data = next;
+    }
+
+    let view = gpu_texture.create_view(&wgpu::TextureViewDescriptor {
+        mip_level_count: Some(mip_level_count),
+        ..Default::default()
+    });
     UploadedTexture {
         texture: gpu_texture,
         view,
