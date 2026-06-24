@@ -689,7 +689,7 @@ impl EditorApp {
                 .world()
                 .get::<&Transform>(entity)
                 .ok()
-                .copied()
+                .map(|t| *t)
                 .unwrap_or_default();
             let center = transform.translation + Vec3::Y * cloud.altitude_offset;
             let half = cloud.size * 0.5;

@@ -7,8 +7,6 @@
 //! The noise is tileable in all 3 axes so the shader can scroll the sampling
 //! offset freely for wind animation without seams.
 
-use wgpu::util::DeviceExt;
-
 const NOISE_SIZE: u32 = 128;
 
 /// Generate a 128³ R8 3D noise texture for cloud rendering.
