@@ -143,6 +143,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     let metallic = clamp(material.parameters.x, 0.0, 1.0);
     let roughness = clamp(material.parameters.y, 0.04, 1.0);
+    let has_normal_map = material.parameters.z > 0.5;
 
     // Build TBN matrix from interpolated vertex tangent for normal mapping.
     let world_normal = normalize(input.world_normal);
@@ -150,7 +151,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let world_bitangent = cross(world_normal, world_tangent) * input.tangent.w;
 
     // Sample normal map and transform from tangent to world space.
-    let normal = sample_normal(normal_texture, base_color_sampler, input.uv, world_normal, world_tangent, world_bitangent);
+    // Use select() instead of if/else for broader WGSL/naga compatibility.
+    let mapped_normal = sample_normal(normal_texture, base_color_sampler, input.uv, world_normal, world_tangent, world_bitangent);
+    let normal = select(world_normal, mapped_normal, has_normal_map);
 
     let view_direction = normalize(camera.position.xyz - input.world_position);
     let light_direction = normalize(-light.direction.xyz);

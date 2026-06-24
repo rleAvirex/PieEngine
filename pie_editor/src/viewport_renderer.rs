@@ -1380,7 +1380,7 @@ impl EditorViewportRenderer {
             parameters: [
                 material.metallic_factor,
                 material.roughness_factor,
-                0.0,
+                if material.normal_texture.is_some() { 1.0 } else { 0.0 },
                 0.0,
             ],
         };
