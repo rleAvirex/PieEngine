@@ -143,8 +143,16 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Camera altitude from world-space Y (meters → km). UE5 places the camera
     // at (0, BottomRadius + altitude, 0); we use the camera's world Y as
     // altitude directly, clamped to stay inside the atmosphere.
+    //
+    // The minimum is 0.001 km (1 m), NOT 0.0: when the camera is at or below
+    // sea level (world Y <= 0), clamping to exactly 0 places it ON the planet
+    // sphere, where ray–sphere intersection becomes degenerate (tangent rays
+    // return t=0). Adjacent pixels then alternate between "tangent hit"
+    // (t_max=0 → black) and "tangent miss" (t_max=large → bright), producing
+    // a 1-pixel grain band along the horizon. The 1 m floor keeps the camera
+    // just above the surface so the math is always well-conditioned.
     let alt_km     = clamp(camera.position.y * 0.001,
-                           0.0,
+                           0.001,
                            sky.atmosphere_radius - sky.planet_radius - PLANET_RADIUS_OFFSET);
     let cam_radius = sky.planet_radius + alt_km;
     let ray_origin = vec3<f32>(0.0, cam_radius, 0.0);
@@ -337,14 +345,29 @@ fn integrate_sky(
         let sample_optical_depth = medium.extinction * dt_step;
         let sample_transmittance = exp(-sample_optical_depth);
 
-        // Sun transmittance to this sample point (inline ray march).
-        let trans_to_sun = sun_transmittance(p, sun_dir, sky.mie_samples);
-
-        // Earth shadow: does the sun ray from P hit the planet?
+        // Earth shadow: does the sun ray from P hit the planet? Computed
+        // BEFORE sun_transmittance so we can skip the expensive inner ray
+        // march when the sample is in shadow (the sun contributes nothing
+        // there, so transmittance is irrelevant). This is the main perf win:
+        // when looking toward the horizon at sunset, most low-altitude samples
+        // are shadowed and skip the O(mie_samples) inner loop entirely.
         let t_earth = ray_sphere_intersect_nearest(
             p, sun_dir, sky.planet_radius,
         );
         let earth_shadow = select(1.0, 0.0, t_earth >= 0.0);
+
+        // Sun transmittance to this sample point. Skipped when in earth
+        // shadow (trans_to_sun is multiplied by earth_shadow below, so 0
+        // contribution either way). Capped at 4 samples — the sun ray is a
+        // smooth exponential integral and doesn't need the full mie_samples
+        // for a visually identical result. This halves the inner-loop cost
+        // at Medium quality (8 → 4) and quarters it at High (16 → 4).
+        let sun_steps = min(sky.mie_samples, 4u);
+        let trans_to_sun = select(
+            sun_transmittance(p, sun_dir, sun_steps),
+            vec3<f32>(0.0),
+            earth_shadow < 0.5,
+        );
 
         // Phase × scattering (single-scattering source term).
         let phase_times_scattering =

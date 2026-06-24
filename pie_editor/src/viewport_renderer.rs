@@ -1623,7 +1623,7 @@ impl EditorViewportRenderer {
             // inside the capture branch, so after the first capture the
             // counter was stuck at 1 and real-time capture never re-ran.
             let throttle_mod = self.sky_light_frame_counter;
-            self.sky_light_frame_counter = (self.sky_light_frame_counter + 1) % 4;
+            self.sky_light_frame_counter = (self.sky_light_frame_counter + 1) % 8;
 
             let should_capture = self.sky_light_dirty
                 || (sky_light.real_time_capture && throttle_mod == 0);
