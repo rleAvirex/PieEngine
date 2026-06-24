@@ -34,6 +34,8 @@ struct CloudUniform {
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<uniform> cloud:  CloudUniform;
+@group(0) @binding(2) var cloud_noise: texture_3d<f32>;
+@group(0) @binding(3) var noise_sampler: sampler;
 
 const PI: f32 = 3.141592653589793;
 
@@ -71,35 +73,10 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return output;
 }
 
-// ── Hash + value noise (cheap, no texture) ─────────────────────────────────
-fn hash2(p: vec2<f32>) -> f32 {
-    let h = dot(p, vec2<f32>(127.1, 311.7));
-    return fract(sin(h) * 43758.5453);
-}
-
-fn value_noise(p: vec2<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);  // smoothstep
-    let a = hash2(i);
-    let b = hash2(i + vec2<f32>(1.0, 0.0));
-    let c = hash2(i + vec2<f32>(0.0, 1.0));
-    let d = hash2(i + vec2<f32>(1.0, 1.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-// 4-octave fbm — gives the soft, wispy cloud look.
-fn fbm(p: vec2<f32>) -> f32 {
-    var v = 0.0;
-    var a = 0.5;
-    var pos = p;
-    for (var i: i32 = 0; i < 4; i = i + 1) {
-        v = v + a * value_noise(pos);
-        pos = pos * 2.0;
-        a = a * 0.5;
-    }
-    return v;
-}
+// ── 3D noise sampling (Phase 2 — texture-based, volumetric look) ───────────
+// Samples the precomputed 128³ Worley+Perlin fbm texture. The 3rd
+// coordinate adds depth variation so the cloud looks volumetric instead
+// of flat. Wind scrolls the sampling offset over time.
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
@@ -110,18 +87,20 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let sun_dir = normalize(cloud.sun_dir_wind.xyz);
     let wind_offset = cloud.sun_dir_wind.w;
     let sun_color = cloud.sun_color_time.xyz;
-    let time = cloud.sun_color_time.w;
 
-    // Distance from camera to cloud center — for fade-out at distance.
-    let cam_to_cloud = length(center - camera.position.xyz);
-
-    // UV in [0,1] for noise sampling. Scroll over time for wind animation.
-    // The scroll direction is fixed (along +X) — wind_speed controls how
-    // fast the offset grows; the actual offset is passed in via the uniform
-    // (computed on the CPU as wind_speed * time).
+    // Sample the 3D noise texture. Map the billboard UV ([-1,1]) into
+    // texture coordinates, plus a wind-scroll offset. The Z coordinate
+    // varies with the view direction's dot against the cloud's "depth"
+    // axis (camera forward), giving parallax as the camera moves.
     let uv = (input.uv + 1.0) * 0.5;
-    let noise_uv = uv * 3.0 + vec2<f32>(wind_offset, wind_offset * 0.3);
-    let n = fbm(noise_uv);
+    let scroll = vec3<f32>(wind_offset, wind_offset * 0.3, wind_offset * 0.15);
+
+    // Two-octave 3D noise: low-frequency for structure, high-frequency for detail.
+    let noise_uvw_low  = vec3<f32>(uv * 2.0, 0.0) + scroll;
+    let noise_uvw_high = vec3<f32>(uv * 5.0, 0.5) + scroll * 1.7;
+    let n_low  = textureSample(cloud_noise, noise_sampler, noise_uvw_low).r;
+    let n_high = textureSample(cloud_noise, noise_sampler, noise_uvw_high).r;
+    let n = n_low * 0.7 + n_high * 0.3;
 
     // Soft circular falloff toward the billboard edges so the cloud doesn't
     // look like a square. Smoothstep from center (1) to edge (0).
@@ -138,8 +117,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     // Lighting: simple directional term based on sun direction. Clouds
     // facing the sun are brighter; clouds on the shadow side are darker.
-    // We approximate "facing the sun" with the dot of the view direction
-    // and the sun direction — bright when looking toward the sun.
     let view_dir = normalize(input.world_pos - camera.position.xyz);
     let sun_facing = max(dot(-view_dir, sun_dir), 0.0);
     let lit = 0.4 + 0.6 * sun_facing;

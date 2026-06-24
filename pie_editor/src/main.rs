@@ -1,5 +1,6 @@
 //! Pie Editor — a visual scene editor built on the PieEngine runtime.
 
+mod cloud_noise;
 mod dock_layout;
 mod fly_camera;
 mod gizmo;
@@ -39,7 +40,7 @@ use gizmo::{
     gizmo_tip_aabb,
 };
 use picking::{
-    PickableBounds, ray_aabb_hit, screen_ray_from_ndc, viewport_ndc_from_rect, world_aabb,
+    PickableBounds, ray_aabb_hit, ray_sphere_hit, screen_ray_from_ndc, viewport_ndc_from_rect, world_aabb,
 };
 use dock_layout::DockState;
 use ui::{EditorCommands, EditorSceneInfo, EditorUiParams, build_editor_ui};
@@ -652,11 +653,52 @@ impl EditorApp {
             }
         }
 
+        // ---- Phase 2.5: Test Cloud entities (ray vs sphere) ----
+        // Clouds are spherical billboards, so we use ray-sphere intersection
+        // for accurate picking. The sphere center is the cloud's transform
+        // translation plus the altitude offset; radius is half the cloud size.
+        for (cloud_entity, (cloud, transform)) in self
+            .runtime
+            .simulation()
+            .world()
+            .query::<(&pie_runtime::components::Cloud, &Transform)>()
+            .iter()
+        {
+            let center = transform.translation + Vec3::Y * cloud.altitude_offset;
+            let radius = cloud.size * 0.5;
+            if let Some(t) = ray_sphere_hit(ray_origin, ray_dir, center, radius)
+                && t < best_t
+            {
+                best_t = t;
+                best_result = Some(PickResult::Entity(cloud_entity));
+            }
+        }
+
         best_result
     }
 
     fn selection_world_aabb(&self) -> Option<(Vec3, Vec3)> {
         let entity = self.selected_entity?;
+
+        // Clouds: build a cube AABB around the cloud center. Clouds aren't in
+        // self.pickables (no mesh), so handle them separately.
+        if let Ok(cloud) = self.runtime.simulation().world().get::<&pie_runtime::components::Cloud>(entity) {
+            let transform = self
+                .runtime
+                .simulation()
+                .world()
+                .get::<&Transform>(entity)
+                .ok()
+                .copied()
+                .unwrap_or_default();
+            let center = transform.translation + Vec3::Y * cloud.altitude_offset;
+            let half = cloud.size * 0.5;
+            return Some((
+                center - Vec3::splat(half),
+                center + Vec3::splat(half),
+            ));
+        }
+
         let pickable = self.pickables.iter().find(|p| p.entity == entity)?;
         let world_transform = self
             .runtime

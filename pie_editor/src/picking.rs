@@ -51,6 +51,33 @@ pub fn ray_aabb_hit(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<f32
     }
 }
 
+/// World-space ray-sphere intersection. Returns the near hit distance `t >= 0`,
+/// or `None` if the ray misses. `dir` need not be normalized; the returned `t`
+/// is in the same units as `dir`.
+///
+/// Used for picking spherical billboards like Clouds that don't have a mesh.
+pub fn ray_sphere_hit(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<f32> {
+    let oc = origin - center;
+    // Quadratic: |dir|^2 t^2 + 2 (oc·dir) t + (|oc|^2 - r^2) = 0
+    let a = dir.dot(dir);
+    let b = 2.0 * oc.dot(dir);
+    let c = oc.dot(oc) - radius * radius;
+    let disc = b * b - 4.0 * a * c;
+    if disc < 0.0 || a.abs() < 1e-12 {
+        return None;
+    }
+    let s = (disc).sqrt();
+    let t0 = (-b - s) / (2.0 * a);
+    let t1 = (-b + s) / (2.0 * a);
+    if t0 >= 0.0 {
+        Some(t0)
+    } else if t1 >= 0.0 {
+        Some(t1)
+    } else {
+        None
+    }
+}
+
 /// Transform a local-space AABB into its world-space axis-aligned equivalent.
 pub fn world_aabb(local_min: Vec3, local_max: Vec3, transform: &Transform) -> (Vec3, Vec3) {
     let corners = [

@@ -343,6 +343,11 @@ pub struct EditorViewportRenderer {
     /// across all clouds in a frame via write_buffer before each draw.
     cloud_uniform_buffer: wgpu::Buffer,
     cloud_bind_group: wgpu::BindGroup,
+    /// 3D noise texture (128³ R8) for volumetric-looking cloud density.
+    /// Generated once at construction via cloud_noise::create_cloud_noise_texture.
+    cloud_noise_texture: wgpu::Texture,
+    cloud_noise_view: wgpu::TextureView,
+    cloud_noise_sampler: wgpu::Sampler,
 }
 
 impl EditorViewportRenderer {
@@ -1197,7 +1202,8 @@ impl EditorViewportRenderer {
                 source: wgpu::ShaderSource::Wgsl(cloud_shader_source.into()),
             });
 
-        // Bind group layout: binding 0 = camera uniform, binding 1 = cloud uniform.
+        // Bind group layout: binding 0 = camera uniform, binding 1 = cloud uniform,
+        // binding 2 = 3D noise texture, binding 3 = noise sampler.
         // Reuses the existing camera_buffer (same CameraUniform struct the
         // shader declares).
         let cloud_camera_bgl =
@@ -1227,6 +1233,22 @@ impl EditorViewportRenderer {
                                 has_dynamic_offset: false,
                                 min_binding_size: None,
                             },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D3,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 3,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                             count: None,
                         },
                     ],
@@ -1297,6 +1319,12 @@ impl EditorViewportRenderer {
             mapped_at_creation: false,
         });
 
+        // Generate the 3D cloud noise texture (128³ R8, Worley+Perlin fbm).
+        // This is the Phase 2 upgrade — the shader samples this for
+        // volumetric-looking density instead of computing 2D procedural noise.
+        let (cloud_noise_texture, cloud_noise_view, cloud_noise_sampler) =
+            crate::cloud_noise::create_cloud_noise_texture(device.as_ref(), queue.as_ref());
+
         let cloud_bind_group = device
             .as_ref()
             .create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1317,6 +1345,14 @@ impl EditorViewportRenderer {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: cloud_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&cloud_noise_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&cloud_noise_sampler),
                     },
                 ],
             });
@@ -1468,6 +1504,9 @@ impl EditorViewportRenderer {
             cloud_camera_bgl,
             cloud_uniform_buffer,
             cloud_bind_group,
+            cloud_noise_texture,
+            cloud_noise_view,
+            cloud_noise_sampler,
         })
     }
 
